@@ -1,0 +1,508 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAADS Alert Archive Search</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 900px; margin: 0 auto; padding: 1.5rem 1rem 4rem;
+    line-height: 1.45;
+  }
+  h1 { font-size: 1.35rem; margin: 0 0 0.25rem; }
+  #stats { color: light-dark(#666, #9a9a9a); font-size: 0.85rem; margin-bottom: 1rem; }
+
+  #banner { display: none; padding: 0.7rem 1rem; border-radius: 8px; margin-bottom: 1rem; font-size: 0.9rem; }
+  #banner.error { display: block; background: #fee2e2; color: #991b1b; }
+
+  input, select, button {
+    font: inherit; font-size: 0.95rem; padding: 0.5rem 0.7rem;
+    border-radius: 6px; border: 1px solid rgba(128,128,128,0.4);
+    background: canvas; color: canvastext;
+  }
+  button { cursor: pointer; }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; font-weight: 600; }
+  button.primary:hover { background: #1d4ed8; }
+  button.ghost { background: transparent; }
+  button.ghost:hover { background: rgba(128,128,128,0.12); }
+
+  .searchbar { display: flex; gap: 0.5rem; margin-bottom: 0.6rem; flex-wrap: wrap; }
+  .searchbar input[type=text] { flex: 1; min-width: 220px; }
+
+  details.filters { margin-bottom: 1rem; border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; }
+  details.filters summary {
+    cursor: pointer; padding: 0.6rem 0.9rem; font-weight: 600; list-style: none;
+    display: flex; align-items: center; gap: 0.5rem; user-select: none;
+  }
+  details.filters summary::-webkit-details-marker { display: none; }
+  details.filters summary::before { content: '\25B8'; display: inline-block; transition: transform 0.15s; }
+  details.filters[open] summary::before { transform: rotate(90deg); }
+  .filter-count { background: #2563eb; color: #fff; border-radius: 999px; font-size: 0.75rem; padding: 0.05rem 0.5rem; }
+  .filters-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.85rem; padding: 0 0.9rem 0.9rem; }
+  .field { display: flex; flex-direction: column; gap: 0.3rem; }
+  .field label { font-size: 0.78rem; color: light-dark(#555, #aaa); font-weight: 600; }
+  .checkbox-field { flex-direction: row; align-items: center; gap: 0.5rem; }
+  .checkbox-field label { font-weight: 500; font-size: 0.9rem; color: inherit; }
+  .filters-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+
+  #resultsSummary { font-size: 0.9rem; color: light-dark(#555, #aaa); margin: 0.25rem 0 0.85rem; min-height: 1.3em; }
+
+  .alert {
+    border: 1px solid rgba(128,128,128,0.25); border-radius: 10px;
+    padding: 0.9rem 1.1rem; margin-bottom: 0.85rem;
+    overflow-wrap: break-word;
+    background: light-dark(rgba(0,0,0,0.015), rgba(255,255,255,0.03));
+  }
+  .alert-badges { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-bottom: 0.35rem; }
+  .alert h3 { margin: 0 0 0.4rem; font-size: 1.05rem; }
+  .pill {
+    display: inline-block; font-size: 0.7rem; font-weight: 700; letter-spacing: 0.02em;
+    text-transform: uppercase; padding: 0.18rem 0.55rem; border-radius: 999px; color: #fff; white-space: nowrap;
+  }
+  .pill-Extreme, .pill-Severe { background: #dc2626; }
+  .pill-Moderate { background: #d97706; }
+  .pill-Minor { background: #16a34a; }
+  .pill-Unknown { background: #6b7280; }
+  .badge { display: inline-block; font-size: 0.7rem; font-weight: 700; padding: 0.18rem 0.55rem; border-radius: 999px; color: #fff; }
+  .badge-bi { background: #dc2626; }
+  .badge-wi { background: #2563eb; }
+
+  .meta { font-size: 0.83rem; color: light-dark(#666, #9a9a9a); margin-bottom: 0.5rem; }
+  .meta .sep { margin: 0 0.35rem; opacity: 0.5; }
+  .description { margin: 0.4rem 0; }
+  .show-more { background: none; border: none; padding: 0; color: #2563eb; font-size: 0.85rem; cursor: pointer; text-decoration: underline; }
+
+  .resource { margin-top: 0.6rem; }
+  .resource audio { width: 100%; max-width: 420px; display: block; height: 2.2rem; margin-top: 0.2rem; }
+  .card-footer { margin-top: 0.6rem; }
+  a.raw { font-size: 0.83rem; }
+
+  #pagination { display: flex; align-items: center; justify-content: center; gap: 0.6rem; margin: 1.25rem 0; flex-wrap: wrap; }
+  #pagination button { padding: 0.45rem 0.9rem; }
+  #pagination button:disabled { cursor: default; opacity: 0.35; }
+  #pageInfo { color: light-dark(#666, #9a9a9a); font-size: 0.85rem; }
+  .page-jump { display: flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; color: light-dark(#666, #9a9a9a); }
+  .page-jump input { width: 4.5em; padding: 0.4rem 0.5rem; text-align: center; }
+  .page-jump button { padding: 0.4rem 0.8rem; }
+
+  .empty-state { text-align: center; padding: 3rem 1rem; color: light-dark(#666, #9a9a9a); }
+  .empty-state button { margin-top: 0.75rem; }
+</style>
+</head>
+<body>
+<h1>NAADS Alert Archive Search</h1>
+<div id="stats">Loading stats…</div>
+<div id="banner"></div>
+
+<form id="searchForm">
+  <div class="searchbar">
+    <input type="text" id="q" placeholder="Search headline, description, area…" aria-label="Search text">
+    <select id="language" aria-label="Language" title="Alerts are issued with a separate CAP block per language; this picks which one to show.">
+      <option value="en">English</option>
+      <option value="fr">French</option>
+      <option value="">All languages</option>
+    </select>
+    <button type="submit" class="primary">Search</button>
+  </div>
+
+  <details class="filters" id="filtersPanel">
+    <summary>Filters <span class="filter-count" id="filterCount" hidden>0</span></summary>
+    <div class="filters-body">
+      <div class="field">
+        <label for="event">Event</label>
+        <input type="text" id="event" placeholder="e.g. Tornado">
+      </div>
+      <div class="field">
+        <label for="severity">Severity</label>
+        <select id="severity">
+          <option value="">Any</option>
+          <option>Extreme</option><option>Severe</option><option>Moderate</option><option>Minor</option><option>Unknown</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="urgency">Urgency</label>
+        <select id="urgency">
+          <option value="">Any</option>
+          <option>Immediate</option><option>Expected</option><option>Future</option><option>Past</option><option>Unknown</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="from">From Date</label>
+        <input type="date" id="from">
+      </div>
+      <div class="field">
+        <label for="to">To Date</label>
+        <input type="date" id="to">
+      </div>
+      <div class="field checkbox-field">
+        <input type="checkbox" id="broadcastImmediate" title="layer:SOREM:1.0:Broadcast_Immediately / layer:EC-MSC-SMC:1.0:Broadcast_Intrusive">
+        <label for="broadcastImmediate">Broadcast Immediate</label>
+      </div>
+      <div class="field checkbox-field">
+        <input type="checkbox" id="wirelessImmediate" title="layer:SOREM:2.0:WirelessImmediate">
+        <label for="wirelessImmediate">Wireless Immediate</label>
+      </div>
+      <div class="filters-actions">
+        <button type="button" class="ghost" id="clearFilters">Clear filters</button>
+      </div>
+    </div>
+  </details>
+</form>
+
+<div id="resultsSummary" aria-live="polite"></div>
+<div id="results"></div>
+<div id="pagination" hidden>
+  <button id="firstPage" type="button" title="First page">&laquo;&laquo;</button>
+  <button id="prevPage" type="button">&laquo; Previous</button>
+  <span id="pageInfo"></span>
+  <button id="nextPage" type="button">Next &raquo;</button>
+  <button id="lastPage" type="button" title="Last page">&raquo;&raquo;</button>
+  <span class="page-jump">
+    <label for="pageJumpInput">Go to page</label>
+    <input type="number" id="pageJumpInput" min="1" inputmode="numeric">
+    <button id="pageJumpGo" type="button">Go</button>
+  </span>
+</div>
+
+<script>
+const PAGE_SIZE = 20;
+let currentOffset = 0;
+let searchSeq = 0; // guards against a slower, stale request clobbering a newer one
+
+function esc(s) {
+  return (s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+function formatDate(iso) {
+  const d = new Date(iso);
+  if (isNaN(d)) return iso;
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+function showBanner(kind, text) {
+  const el = document.getElementById('banner');
+  el.className = kind;
+  el.textContent = text;
+}
+function hideBanner() {
+  const el = document.getElementById('banner');
+  el.className = '';
+  el.textContent = '';
+}
+
+async function loadStats() {
+  try {
+    const r = await fetch('/api/stats');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const s = await r.json();
+    document.getElementById('stats').textContent =
+      `${s.total.toLocaleString()} alerts indexed` + (s.latestSent ? ` · latest: ${formatDate(s.latestSent)}` : '');
+  } catch (err) {
+    document.getElementById('stats').textContent = 'Stats unavailable.';
+  }
+}
+
+function renderResources(resources) {
+  if (!resources || !resources.length) return '';
+  return resources.map((r) => {
+    const src = `/api/resource/${r.id}`;
+    const label = esc(r.resourceDesc || r.mimeType || 'attachment');
+    if ((r.mimeType || '').startsWith('audio/')) {
+      return `<div class="resource">
+        <div class="meta">${label}</div>
+        <audio controls preload="none" src="${src}">Your browser does not support audio playback.</audio>
+      </div>`;
+    }
+    return `<div class="resource"><a href="${src}" target="_blank" rel="noopener">${label}</a></div>`;
+  }).join('');
+}
+
+function currentFilterParams() {
+  const params = new URLSearchParams();
+  const q = document.getElementById('q').value.trim();
+  const event = document.getElementById('event').value.trim();
+  const severity = document.getElementById('severity').value;
+  const urgency = document.getElementById('urgency').value;
+  const from = document.getElementById('from').value;
+  const to = document.getElementById('to').value;
+  const language = document.getElementById('language').value;
+  const broadcastImmediate = document.getElementById('broadcastImmediate').checked;
+  const wirelessImmediate = document.getElementById('wirelessImmediate').checked;
+  if (q) params.set('q', q);
+  if (event) params.set('event', event);
+  if (severity) params.set('severity', severity);
+  if (urgency) params.set('urgency', urgency);
+  if (from) params.set('from', from);
+  if (to) params.set('to', to);
+  if (language) params.set('language', language);
+  if (broadcastImmediate) params.set('broadcastImmediate', '1');
+  if (wirelessImmediate) params.set('wirelessImmediate', '1');
+  return params;
+}
+
+// Filters inside the collapsible panel only -- excludes the always-visible
+// search text, since that's not what the panel's badge/"Clear filters" refer to.
+function activeFilterCount() {
+  let n = 0;
+  if (document.getElementById('event').value.trim()) n++;
+  if (document.getElementById('severity').value) n++;
+  if (document.getElementById('urgency').value) n++;
+  if (document.getElementById('from').value) n++;
+  if (document.getElementById('to').value) n++;
+  if (document.getElementById('broadcastImmediate').checked) n++;
+  if (document.getElementById('wirelessImmediate').checked) n++;
+  return n;
+}
+
+function updateFilterCountBadge() {
+  const n = activeFilterCount();
+  const badge = document.getElementById('filterCount');
+  badge.hidden = n === 0;
+  badge.textContent = n;
+}
+
+function resetAdvancedFields() {
+  document.getElementById('event').value = '';
+  document.getElementById('severity').value = '';
+  document.getElementById('urgency').value = '';
+  document.getElementById('from').value = '';
+  document.getElementById('to').value = '';
+  document.getElementById('broadcastImmediate').checked = false;
+  document.getElementById('wirelessImmediate').checked = false;
+}
+
+function applyFiltersFromUrl() {
+  const params = new URLSearchParams(location.search);
+  document.getElementById('q').value = params.get('q') || '';
+  document.getElementById('event').value = params.get('event') || '';
+  document.getElementById('severity').value = params.get('severity') || '';
+  document.getElementById('urgency').value = params.get('urgency') || '';
+  document.getElementById('from').value = params.get('from') || '';
+  document.getElementById('to').value = params.get('to') || '';
+  // Defaults to English if the URL doesn't say otherwise -- use ?language=
+  // (empty) explicitly to land on "All languages" instead.
+  document.getElementById('language').value = params.has('language') ? params.get('language') : 'en';
+  document.getElementById('broadcastImmediate').checked = params.get('broadcastImmediate') === '1';
+  document.getElementById('wirelessImmediate').checked = params.get('wirelessImmediate') === '1';
+  currentOffset = parseInt(params.get('offset'), 10) || 0;
+
+  if (activeFilterCount() > 0) document.getElementById('filtersPanel').open = true;
+  updateFilterCountBadge();
+}
+
+// Keeps the address bar in sync with the current search so refreshing,
+// bookmarking, or sharing the URL reproduces the same view.
+function updateUrl() {
+  const params = currentFilterParams();
+  if (currentOffset) params.set('offset', currentOffset);
+  const qs = params.toString();
+  history.replaceState(null, '', qs ? '?' + qs : location.pathname);
+}
+
+let lastTotal = 0;
+let lastLimit = PAGE_SIZE;
+
+function renderPagination(total, limit, offset, resultCount) {
+  const bar = document.getElementById('pagination');
+  if (total === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  lastTotal = total;
+  lastLimit = limit;
+  const page = Math.floor(offset / limit) + 1;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  document.getElementById('pageInfo').textContent = `Page ${page} of ${totalPages}`;
+  document.getElementById('firstPage').disabled = offset <= 0;
+  document.getElementById('prevPage').disabled = offset <= 0;
+  document.getElementById('nextPage').disabled = offset + limit >= total;
+  document.getElementById('lastPage').disabled = offset + limit >= total;
+  const jumpInput = document.getElementById('pageJumpInput');
+  jumpInput.max = totalPages;
+  jumpInput.value = page;
+}
+
+// Jumps directly to a given 1-based page number, clamped to the known
+// range. Used by First/Previous/Next/Last and the "Go to page" input, so
+// they all share one source of truth for page math.
+function goToPage(pageNum) {
+  const totalPages = Math.max(1, Math.ceil(lastTotal / lastLimit));
+  const clamped = Math.min(Math.max(1, pageNum), totalPages);
+  currentOffset = (clamped - 1) * lastLimit;
+  search(false);
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function renderEmptyState() {
+  const container = document.getElementById('results');
+  container.innerHTML = '';
+  // Include the language selector even though it's outside the advanced
+  // panel: it's applied by default (English), so a language-caused empty
+  // result shouldn't be reported as "the database is empty".
+  const hasQuery = document.getElementById('q').value.trim() || activeFilterCount() > 0 ||
+    document.getElementById('language').value !== '';
+  const div = document.createElement('div');
+  div.className = 'empty-state';
+  if (hasQuery) {
+    div.innerHTML = `No alerts match your search.<br><button type="button" id="emptyClear">Clear search &amp; filters</button>`;
+    container.appendChild(div);
+    document.getElementById('emptyClear').addEventListener('click', () => {
+      document.getElementById('q').value = '';
+      document.getElementById('language').value = 'en';
+      resetAdvancedFields();
+      search(true);
+    });
+  } else {
+    div.textContent = 'No alerts in the database yet.';
+    container.appendChild(div);
+  }
+}
+
+function renderCard(a) {
+  const div = document.createElement('div');
+  div.className = 'alert';
+
+  const sevClass = ['Extreme', 'Severe', 'Moderate', 'Minor'].includes(a.severity) ? a.severity : 'Unknown';
+  const statusTag = (a.status && a.status !== 'Actual')
+    ? `<span class="pill pill-Unknown">${esc(a.status)}</span>`
+    : '';
+  const badges =
+    (a.broadcast_immediate ? '<span class="badge badge-bi" title="Broadcast Immediate">BI</span>' : '') +
+    (a.wireless_immediate ? '<span class="badge badge-wi" title="Wireless Immediate">WI</span>' : '');
+
+  const description = esc(a.description || '');
+  const truncated = description.length > 320;
+  const shortDesc = truncated ? description.slice(0, 320) + '…' : description;
+
+  div.innerHTML = `
+    <div class="alert-badges">
+      <span class="pill pill-${sevClass}">${esc(a.severity || 'Unknown')}</span>
+      ${statusTag}
+      ${badges}
+    </div>
+    <h3>${esc(a.headline || a.event || '(no headline)')}</h3>
+    <div class="meta">
+      ${formatDate(a.sent)}<span class="sep">·</span>${esc(a.event || 'Unknown event')}<span class="sep">·</span>urgency: ${esc(a.urgency)}<span class="sep">·</span>certainty: ${esc(a.certainty)}<span class="sep">·</span>${esc(a.source || a.sender)}
+    </div>
+    <div class="description">
+      <span class="desc-text">${shortDesc}</span>
+      ${truncated ? `<button type="button" class="show-more">Show more</button>` : ''}
+    </div>
+    ${a.area_desc ? `<div class="meta">Area: ${esc(a.area_desc)}</div>` : ''}
+    ${renderResources(a.resources)}
+    <div class="card-footer">
+      <a class="raw" href="/api/alert/${a.id}/xml" target="_blank" rel="noopener">View raw CAP-CP XML ↗</a>
+    </div>
+  `;
+
+  if (truncated) {
+    const btn = div.querySelector('.show-more');
+    const span = div.querySelector('.desc-text');
+    let expanded = false;
+    btn.addEventListener('click', () => {
+      expanded = !expanded;
+      span.textContent = expanded ? description : shortDesc;
+      btn.textContent = expanded ? 'Show less' : 'Show more';
+    });
+  }
+
+  return div;
+}
+
+// resetPage: true when filters changed (start over at page 1), false when
+// paging with the existing filters (Prev/Next) or on initial load (where
+// the page is instead restored from the URL).
+async function search(resetPage = true) {
+  if (resetPage) currentOffset = 0;
+  const mySeq = ++searchSeq;
+
+  updateFilterCountBadge();
+  updateUrl();
+  hideBanner();
+  document.getElementById('resultsSummary').textContent = 'Searching…';
+
+  const params = currentFilterParams();
+  params.set('limit', PAGE_SIZE);
+  params.set('offset', currentOffset);
+
+  let data;
+  try {
+    const r = await fetch('/api/search?' + params.toString());
+    if (!r.ok) throw new Error(`server returned HTTP ${r.status}`);
+    data = await r.json();
+  } catch (err) {
+    if (mySeq !== searchSeq) return; // superseded by a newer search
+    document.getElementById('resultsSummary').textContent = '';
+    showBanner('error', `Could not load results (${err.message}). Check the server is running and try again.`);
+    return;
+  }
+  if (mySeq !== searchSeq) return;
+
+  const container = document.getElementById('results');
+  container.innerHTML = '';
+
+  if (!data.results.length) {
+    document.getElementById('resultsSummary').textContent = '';
+    renderEmptyState();
+    renderPagination(0, PAGE_SIZE, currentOffset, 0);
+    return;
+  }
+
+  document.getElementById('resultsSummary').textContent =
+    `${data.total.toLocaleString()} alert${data.total === 1 ? '' : 's'} found`;
+  for (const a of data.results) container.appendChild(renderCard(a));
+  renderPagination(data.total, data.limit, data.offset, data.results.length);
+}
+
+document.getElementById('searchForm').addEventListener('submit', (e) => {
+  e.preventDefault();
+  search(true);
+});
+
+document.getElementById('clearFilters').addEventListener('click', () => {
+  resetAdvancedFields();
+  search(true);
+});
+
+const debouncedSearch = debounce(() => search(true), 350);
+document.getElementById('q').addEventListener('input', debouncedSearch);
+document.getElementById('event').addEventListener('input', debouncedSearch);
+['language', 'severity', 'urgency', 'from', 'to', 'broadcastImmediate', 'wirelessImmediate'].forEach((id) => {
+  document.getElementById(id).addEventListener('change', () => search(true));
+});
+
+function currentPageNumber() {
+  return Math.floor(currentOffset / lastLimit) + 1;
+}
+
+document.getElementById('firstPage').addEventListener('click', () => goToPage(1));
+document.getElementById('prevPage').addEventListener('click', () => goToPage(currentPageNumber() - 1));
+document.getElementById('nextPage').addEventListener('click', () => goToPage(currentPageNumber() + 1));
+document.getElementById('lastPage').addEventListener('click', () => goToPage(Math.ceil(lastTotal / lastLimit)));
+
+document.getElementById('pageJumpGo').addEventListener('click', () => {
+  const val = parseInt(document.getElementById('pageJumpInput').value, 10);
+  if (!isNaN(val)) goToPage(val);
+});
+document.getElementById('pageJumpInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    document.getElementById('pageJumpGo').click();
+  }
+});
+
+applyFiltersFromUrl();
+loadStats();
+search(false); // false: keep the page number restored from the URL
+</script>
+</body>
+</html>

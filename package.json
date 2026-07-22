@@ -1,0 +1,22 @@
+{
+  "name": "naads-archive",
+  "version": "1.0.0",
+  "description": "Archive and real-time listener for the Canadian NAADS (National Alert Aggregation & Dissemination System), with a searchable database of CAP-CP alerts.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "backfill": "node bin/backfill.js",
+    "backfill-resources": "node bin/backfill-resources.js",
+    "backfill-flags": "node bin/backfill-flags.js",
+    "search": "node bin/search.js"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.0",
+    "fast-xml-parser": "^5.10.1",
+    "pg": "^8.13.0"
+  }
+}

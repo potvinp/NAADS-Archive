@@ -1,0 +1,31 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      - PORT=3000
+      - ARCHIVE_POLL_MINUTES=15
+      # Uncomment (and the postgres service + depends_on below) to use
+      # PostgreSQL instead of the bundled SQLite file:
+      # - DATABASE_URL=postgresql://naads:naads@postgres:5432/naads
+    # depends_on:
+    #   - postgres
+    restart: unless-stopped
+
+  # Optional -- only started with `docker compose --profile postgres up`.
+  postgres:
+    image: postgres:16-alpine
+    profiles: ["postgres"]
+    environment:
+      - POSTGRES_USER=naads
+      - POSTGRES_PASSWORD=naads
+      - POSTGRES_DB=naads
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  pgdata:
