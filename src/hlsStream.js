@@ -44,6 +44,7 @@ const CFG = {
   window: Math.max(6, Number(process.env.NAADS_STREAM_WINDOW) || 24),
   lookaheadSegments: Math.max(1, Number(process.env.NAADS_STREAM_LOOKAHEAD_SEGMENTS) || 3),
   minAlertSeconds: Math.max(10, Number(process.env.NAADS_STREAM_MIN_ALERT_SECONDS) || 20),
+  minPageSec: Math.max(3, Number(process.env.NAADS_STREAM_PAGE_SECONDS) || 8),
   leadSilenceSec: Math.max(0, Number(process.env.NAADS_STREAM_LEAD_SILENCE) || 2.5),
   idleMinutes: Math.max(1, Number(process.env.NAADS_STREAM_IDLE_MINUTES) || 10),
   maxChannels: Math.max(1, Number(process.env.NAADS_STREAM_MAX_CHANNELS) || 24),
@@ -104,13 +105,34 @@ function wrap(text, cols) {
 const COMMON_V = ['-r', String(CFG.fps), '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'stillimage', '-pix_fmt', 'yuv420p', '-g', String(CFG.fps * 2), '-sc_threshold', '0'];
 const COMMON_A = ['-c:a', 'aac', '-b:a', '128k', '-ar', '44100', '-ac', '2'];
 
-function drawtext(file, { font, size, y, color = 'white', lineSpacing }) {
-  const parts = [`fontfile=${font}`, `textfile=${file}`, `fontcolor=${color}`, `fontsize=${size}`, 'x=(w-text_w)/2', `y=${y}`];
+function drawtext(file, { font, size, y, x = '(w-text_w)/2', color = 'white', lineSpacing }) {
+  const parts = [`fontfile=${font}`, `textfile=${file}`, `fontcolor=${color}`, `fontsize=${size}`, `x=${x}`, `y=${y}`];
   if (lineSpacing != null) parts.push(`line_spacing=${lineSpacing}`);
   return 'drawtext=' + parts.join(':');
 }
 
-async function renderCard(pngPath, workDir, { bg, kicker, headline, body, footer }) {
+// Body text layout on an alert card: kept generous (bigger type, fewer
+// chars per line) so it reads from across a room on a TV -- which also
+// means long alerts spill onto extra pages sooner.
+const BODY_SIZE = Math.round(H / 25);
+const BODY_COLS = Math.max(24, Number(process.env.NAADS_STREAM_PAGE_COLS) || 46);
+const BODY_LINE_H = Math.round(BODY_SIZE * 1.7);
+const BODY_TOP = Math.round(H * 0.28);
+const BODY_MAX_H = Math.round(H * 0.5);
+
+function bodyLinesPerCard() {
+  return Math.max(3, Number(process.env.NAADS_STREAM_PAGE_LINES) || Math.floor(BODY_MAX_H / BODY_LINE_H));
+}
+
+// Split already-wrapped body lines into cards of at most `perCard` lines.
+function paginateLines(lines, perCard) {
+  if (!lines.length) return [['']];
+  const pages = [];
+  for (let i = 0; i < lines.length; i += perCard) pages.push(lines.slice(i, i + perCard));
+  return pages;
+}
+
+async function renderCard(pngPath, workDir, { bg, kicker, headline, bodyLines, footer, page }) {
   const put = (name, txt) => {
     const f = path.join(workDir, name);
     fs.writeFileSync(f, txt);
@@ -118,12 +140,7 @@ async function renderCard(pngPath, workDir, { bg, kicker, headline, body, footer
   };
   const kickerSize = Math.round(H / 12);
   const headSize = Math.round(H / 26);
-  const bodySize = Math.round(H / 30);
   const footSize = Math.round(H / 40);
-
-  const bodyLines = wrap(body, Math.floor((W * 0.86) / (bodySize * 0.62)));
-  const maxLines = Math.floor((H * 0.5) / (bodySize * 1.6));
-  const trimmed = bodyLines.length > maxLines ? bodyLines.slice(0, maxLines - 1).concat('...') : bodyLines;
 
   const vf = [
     drawtext(put('kicker.txt', kicker), { font: CFG.font, size: kickerSize, y: Math.round(H * 0.08) }),
@@ -131,9 +148,17 @@ async function renderCard(pngPath, workDir, { bg, kicker, headline, body, footer
   if (headline) {
     vf.push(drawtext(put('headline.txt', wrap(headline, 60).join('\n')), { font: CFG.font, size: headSize, y: Math.round(H * 0.08 + kickerSize * 1.4), color: '0xF2F2F2' }));
   }
-  vf.push(drawtext(put('body.txt', trimmed.join('\n')), { font: CFG.fontMono || CFG.font, size: bodySize, y: Math.round(H * 0.3), lineSpacing: Math.round(bodySize * 0.6) }));
+  vf.push(drawtext(put('body.txt', bodyLines.join('\n')), { font: CFG.fontMono || CFG.font, size: BODY_SIZE, y: BODY_TOP, lineSpacing: Math.round(BODY_SIZE * 0.7) }));
   if (footer) {
     vf.push(drawtext(put('footer.txt', wrap(footer, 90).join('\n')), { font: CFG.font, size: footSize, y: `h-text_h-${Math.round(H * 0.06)}`, color: '0xE6E6E6' }));
+  }
+  if (page && page.total > 1) {
+    vf.push(
+      drawtext(put('page.txt', `${page.n} / ${page.total}`), {
+        font: CFG.font, size: footSize, color: '0xE6E6E6',
+        x: `w-text_w-${Math.round(W * 0.04)}`, y: `h-text_h-${Math.round(H * 0.055)}`,
+      })
+    );
   }
 
   await run(FFMPEG, ['-y', '-f', 'lavfi', '-i', `color=c=${bg}:s=${W}x${H}`, '-vf', vf.join(','), '-frames:v', '1', pngPath]);
@@ -172,7 +197,7 @@ async function buildSlate() {
       bg: '0x0B0B0C',
       kicker: 'NAADS ALERT MONITOR',
       headline: '',
-      body: 'No active broadcast alert.\nStanding by on the NAADS real-time feed.',
+      bodyLines: ['No active broadcast alert.', 'Standing by on the NAADS real-time feed.'],
       footer: '',
     });
     fs.mkdirSync(SHARED(), { recursive: true });
@@ -203,15 +228,14 @@ async function buildAlertBlock(alert) {
     // Immediate is set; amber for everything else.
     const test = isTestAlert(alert);
     const emerg = isEmergency(alert);
-    const png = path.join(wd, 'card.png');
     const onAir = alert.broadcastText || [alert.description, alert.instruction].filter(Boolean).join('\n\n');
-    await renderCard(png, wd, {
+    const cardOpts = {
       bg: test ? '0x3F3F46' : emerg ? '0xC8102E' : '0xB45309',
       kicker: test ? 'TEST ALERT' : emerg ? 'EMERGENCY ALERT' : (alert.event || 'ALERT').toUpperCase(),
       headline: (alert.headline || '').toUpperCase(),
-      body: (onAir || 'No message text provided.').toUpperCase(),
       footer: [alert.event, alert.areaDesc, alert.sent].filter(Boolean).join('  -  '),
-    });
+    };
+    const wrapped = wrap((onAir || 'No message text provided.').toUpperCase(), BODY_COLS);
 
     // Pre-tone, the Alert Ready tone, and Post-Message wrap an alert only
     // when it's an emergency (Broadcast/Wireless Immediate). Everything else
@@ -243,17 +267,52 @@ async function buildAlertBlock(alert) {
     audio = padded;
     dur = await probeDuration(audio);
 
+    // Now that the block's total duration is known, split the message into
+    // as many cards as it needs (long alerts scroll onto new pages instead
+    // of being truncated), capped so each card shows at least minPageSec.
+    let pageLines = paginateLines(wrapped, bodyLinesPerCard());
+    if (pageLines.length > 1) {
+      const maxPages = Math.max(1, Math.floor(dur / CFG.minPageSec));
+      if (pageLines.length > maxPages) {
+        pageLines = paginateLines(wrapped, Math.ceil(wrapped.length / maxPages));
+      }
+    }
+    const pagePngs = [];
+    for (let p = 0; p < pageLines.length; p++) {
+      const f = path.join(wd, `card${p}.png`);
+      await renderCard(f, wd, { ...cardOpts, bodyLines: pageLines[p], page: { n: p + 1, total: pageLines.length } });
+      pagePngs.push(f);
+    }
+
     // Encode the whole block once to an exact-length MPEG-TS, then cut it
     // into segments with `-reset_timestamps 1` so each segment's PTS starts
     // at ~0 -- the channel then places every segment (slate and alert
     // alike) on one monotonic timeline at publish time, so the playlist
     // needs no #EXT-X-DISCONTINUITY and hls.js never flushes its buffer.
     const blockTs = path.join(wd, 'block.ts');
-    await run(FFMPEG, [
-      '-y', '-loop', '1', '-framerate', String(CFG.fps), '-i', png, '-i', audio,
-      ...COMMON_V, ...COMMON_A, '-map', '0:v:0', '-map', '1:a:0', '-t', dur.toFixed(3),
-      '-muxpreload', '0', '-muxdelay', '0', '-f', 'mpegts', blockTs,
-    ]);
+    if (pagePngs.length === 1) {
+      await run(FFMPEG, [
+        '-y', '-loop', '1', '-framerate', String(CFG.fps), '-i', pagePngs[0], '-i', audio,
+        ...COMMON_V, ...COMMON_A, '-map', '0:v:0', '-map', '1:a:0', '-t', dur.toFixed(3),
+        '-muxpreload', '0', '-muxdelay', '0', '-f', 'mpegts', blockTs,
+      ]);
+    } else {
+      // One image per page, each shown for an equal slice of the block, then
+      // concatenated into the video track and muxed with the audio.
+      const pageDur = dur / pagePngs.length + 0.05; // slight overshoot; -t clamps
+      const args = ['-y'];
+      for (const f of pagePngs) args.push('-loop', '1', '-t', pageDur.toFixed(3), '-i', f);
+      args.push('-i', audio);
+      const vin = pagePngs.map((_, k) => `[${k}:v]`).join('');
+      args.push(
+        '-filter_complex', `${vin}concat=n=${pagePngs.length}:v=1:a=0,fps=${CFG.fps},format=yuv420p[v]`,
+        '-map', '[v]', '-map', `${pagePngs.length}:a:0`,
+        ...COMMON_V.slice(2), // drop leading "-r <fps>"; the fps filter handles it
+        ...COMMON_A, '-t', dur.toFixed(3),
+        '-muxpreload', '0', '-muxdelay', '0', '-f', 'mpegts', blockTs
+      );
+      await run(FFMPEG, args);
+    }
     await run(FFMPEG, [
       '-y', '-i', blockTs, '-map', '0', '-c', 'copy',
       '-f', 'segment', '-segment_time', String(CFG.seg), '-segment_format', 'mpegts',

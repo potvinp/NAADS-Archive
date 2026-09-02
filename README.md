@@ -376,12 +376,14 @@ players can't send the session cookie, so when auth is on set
 `user`/`admin` browser session. The `/stream` page requires a session when
 auth is on; `/s/<key>` does not.
 
-**Still rough:** the on-air card is static per alert (the browser
-[monitor](#live-broadcast-feed) keeps full `1/N` pagination); there's no
-raw always-on `/stream.ts` endpoint (HLS only); and long messages are
-truncated to fit one card. `/api/resource/:id` still streams embedded bytes
-without HTTP `Range` (fine for `ffmpeg`; would break `<video>` scrubbing of
-an embedded video, which NAADS alerts don't currently carry).
+Long messages page onto extra cards (`1 / N` bottom-right, each shown for at
+least `NAADS_STREAM_PAGE_SECONDS`), matching the browser monitor.
+
+**Still rough:** there's no raw always-on `/stream.ts` endpoint (HLS only);
+page timing divides the alert evenly rather than tracking the TTS.
+`/api/resource/:id` still streams embedded bytes without HTTP `Range` (fine
+for `ffmpeg`; would break `<video>` scrubbing of an embedded video, which
+NAADS alerts don't currently carry).
 
 ## Authentication (optional, multi-user)
 

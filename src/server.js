@@ -339,29 +339,30 @@ function createServer() {
     }
   });
 
-  // Operator-triggered test: replays a stored alert (NAADS_TEST_ALERT_ID,
-  // default 815048) through the live bus as a Test-status message, so it
-  // exercises the whole monitor + HLS pipeline. Bypasses every filter
-  // (`manualTest`) and is lightly rate-limited so it can't flood the queue.
+  // Operator-triggered test: replays a stored alert through the live bus so
+  // it exercises the whole monitor + HLS pipeline. Bypasses every filter
+  // (`manualTest`) and is lightly rate-limited. `?id=` picks the alert
+  // (default NAADS_TEST_ALERT_ID / 815048); `?raw=1` keeps its real
+  // status/headline instead of showing it as a grey TEST card.
   let lastBroadcastTest = 0;
   app.post('/api/broadcast-test', async (req, res) => {
     if (auth.authEnabled() && !auth.requireBroadcast(req, res)) return;
     if (Date.now() - lastBroadcastTest < 8000) {
       return res.status(429).json({ error: 'a test was just sent — wait a few seconds' });
     }
-    const id = process.env.NAADS_TEST_ALERT_ID || '815048';
+    const id = req.query.id || (req.body && req.body.id) || process.env.NAADS_TEST_ALERT_ID || '815048';
+    const raw = /^(1|true|yes)$/i.test(req.query.raw || (req.body && req.body.raw) || '');
     try {
       const alert = await getAlertForBroadcast(id, { language: process.env.NAADS_BROADCAST_LANG || 'en' });
-      if (!alert) return res.status(404).json({ error: `test alert ${id} not in the database` });
+      if (!alert) return res.status(404).json({ error: `alert ${id} not in the database` });
       lastBroadcastTest = Date.now();
       alertBus.emit('alert', {
         ...alert,
-        status: 'Test',
-        headline: `TEST — ${alert.headline || alert.event || 'broadcast monitor'}`,
+        ...(raw ? {} : { status: 'Test', headline: `TEST — ${alert.headline || alert.event || 'broadcast monitor'}` }),
         manualTest: true,
         receivedAt: new Date().toISOString(),
       });
-      res.json({ ok: true, emitted: alert.id });
+      res.json({ ok: true, emitted: alert.id, raw });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
