@@ -90,9 +90,14 @@
 
   .empty-state { text-align: center; padding: 3rem 1rem; color: light-dark(#666, #9a9a9a); }
   .empty-state button { margin-top: 0.75rem; }
+
+  #topnav { float: right; font-size: 0.85rem; display: flex; gap: 0.8rem; align-items: center; }
+  #topnav a { color: #2563eb; cursor: pointer; }
+  #topnav .user { color: light-dark(#666, #9a9a9a); }
 </style>
 </head>
 <body>
+<div id="topnav"></div>
 <h1>NAADS Alert Archive Search</h1>
 <div id="stats">Loading stats…</div>
 <div id="banner"></div>
@@ -500,7 +505,33 @@ document.getElementById('pageJumpInput').addEventListener('keydown', (e) => {
   }
 });
 
+// Header nav: a Broadcast link (hidden for guests) and, when auth is on, a
+// logout control. Best-effort -- a failure just leaves the nav empty.
+async function loadNav() {
+  let me;
+  try {
+    const r = await fetch('/api/me');
+    me = r.ok ? await r.json() : null;
+  } catch { me = null; }
+  const nav = document.getElementById('topnav');
+  const parts = [];
+  if (!me || !me.authEnabled || me.canBroadcast) {
+    parts.push('<a href="/broadcast">Broadcast monitor</a>');
+  }
+  if (me && me.authEnabled) {
+    parts.push('<span class="user">' + (me.username ? me.username : '') + '</span>');
+    parts.push('<a id="logoutLink">Log out</a>');
+  }
+  nav.innerHTML = parts.join('');
+  const logout = document.getElementById('logoutLink');
+  if (logout) logout.addEventListener('click', async () => {
+    await fetch('/api/logout', { method: 'POST' });
+    location.href = '/login';
+  });
+}
+
 applyFiltersFromUrl();
+loadNav();
 loadStats();
 search(false); // false: keep the page number restored from the URL
 </script>

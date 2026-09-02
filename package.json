@@ -9,10 +9,13 @@
     "backfill": "node bin/backfill.js",
     "backfill-resources": "node bin/backfill-resources.js",
     "backfill-flags": "node bin/backfill-flags.js",
-    "search": "node bin/search.js"
+    "backfill-geo": "node bin/backfill-geo.js",
+    "search": "node bin/search.js",
+    "user": "node bin/user.js"
   },
   "license": "MIT",
   "dependencies": {
+    "bcryptjs": "^2.4.3",
     "better-sqlite3": "^11.3.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.0",

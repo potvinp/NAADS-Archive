@@ -1,0 +1,763 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAADS Live Broadcast Monitor</title>
+<style>
+  :root { color-scheme: light dark; }
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    max-width: 960px; margin: 0 auto; padding: 1.25rem 1rem 4rem; line-height: 1.45;
+  }
+  a { color: #2563eb; }
+  h1 { font-size: 1.3rem; margin: 0; }
+  .topbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.5rem; }
+  .topbar .spacer { flex: 1; }
+  .who { font-size: 0.85rem; color: light-dark(#666, #9a9a9a); }
+
+  button {
+    font: inherit; font-size: 0.95rem; padding: 0.5rem 0.8rem; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,0.4); background: canvas; color: canvastext; cursor: pointer;
+  }
+  button.primary { background: #2563eb; color: #fff; border-color: #2563eb; font-weight: 600; }
+  button.primary:hover { background: #1d4ed8; }
+  button.ghost { background: transparent; }
+  button:disabled { opacity: 0.4; cursor: default; }
+
+  .status { display: inline-flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; font-weight: 600; }
+  .dot { width: 0.6rem; height: 0.6rem; border-radius: 999px; background: #9ca3af; }
+  .status.live .dot { background: #16a34a; }
+  .status.connecting .dot { background: #d97706; }
+  .status.error .dot { background: #dc2626; }
+
+  .notice { padding: 2.5rem 1rem; text-align: center; color: light-dark(#555, #aaa); }
+
+  details.filters { margin: 0.75rem 0 1rem; border: 1px solid rgba(128,128,128,0.3); border-radius: 8px; }
+  details.filters summary {
+    cursor: pointer; padding: 0.6rem 0.9rem; font-weight: 600; list-style: none; user-select: none;
+    display: flex; align-items: center; gap: 0.5rem;
+  }
+  details.filters summary::-webkit-details-marker { display: none; }
+  details.filters summary::before { content: '\25B8'; transition: transform 0.15s; }
+  details.filters[open] summary::before { transform: rotate(90deg); }
+  .filters-body { padding: 0 0.9rem 0.9rem; display: grid; gap: 0.9rem; }
+  .field label { font-size: 0.78rem; font-weight: 600; color: light-dark(#555, #aaa); display: block; margin-bottom: 0.3rem; }
+  .field input[type=text], .field input[type=number], .field select {
+    font: inherit; padding: 0.45rem 0.6rem; border-radius: 6px;
+    border: 1px solid rgba(128,128,128,0.4); background: canvas; color: canvastext;
+  }
+  .provinces { display: flex; flex-wrap: wrap; gap: 0.5rem 0.9rem; }
+  .provinces label { font-size: 0.9rem; font-weight: 500; display: inline-flex; align-items: center; gap: 0.35rem; }
+  .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: end; }
+  .hint { font-size: 0.8rem; color: light-dark(#777, #999); }
+
+  #nowWrap { border: 2px solid #2563eb; border-radius: 12px; padding: 1rem 1.1rem; margin-bottom: 1rem; }
+  #nowWrap.idle { border-color: rgba(128,128,128,0.3); }
+  #nowWrap.onair.emergency { border-color: #c8102e; }
+  #nowWrap.onair.advisory { border-color: #b45309; }
+  #nowWrap.onair.test { border-color: #52525b; }
+  #nowWrap h2 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; margin: 0 0 0.5rem; color: light-dark(#666, #9a9a9a); }
+  .queued { font-size: 0.85rem; color: light-dark(#666, #9a9a9a); }
+
+  /* On-air card, styled after the CAP visual alert shown on Canadian TV: a
+     full-bleed panel with the message text large and centred plus a page
+     counter. Red "EMERGENCY ALERT" only for Broadcast/Wireless Immediate;
+     amber for other alerts; grey for tests. */
+  .eas {
+    background: #b45309; color: #fff; border-radius: 8px;
+    padding: 1.5rem 1.25rem 2.5rem; position: relative;
+    display: flex; flex-direction: column; align-items: center; text-align: center;
+    justify-content: center; min-height: 52vh; gap: 0.9rem;
+  }
+  .eas.emergency { background: #c8102e; }
+  .eas.test { background: #3f3f46; }
+  .eas-kicker { font-weight: 800; letter-spacing: 0.14em; font-size: 1.5rem; text-transform: uppercase; }
+  .eas-headline { font-size: 1rem; letter-spacing: 0.04em; text-transform: uppercase; opacity: 0.95; max-width: 60ch; }
+  .eas-body {
+    font-family: ui-monospace, "Cascadia Mono", "DejaVu Sans Mono", Menlo, Consolas, monospace;
+    font-size: clamp(1.05rem, 2.6vw, 1.7rem); line-height: 1.7; text-transform: uppercase;
+    max-width: 42ch; margin: auto 0; white-space: pre-wrap;
+  }
+  .eas-meta { font-size: 0.8rem; letter-spacing: 0.03em; opacity: 0.9; text-transform: uppercase; }
+  .eas-page { position: absolute; right: 1.1rem; bottom: 1rem; font-size: 1rem; font-weight: 700; opacity: 0.85; }
+  .eas-below { margin-top: 0.75rem; display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: flex-start; }
+  .eas-below audio { width: 100%; max-width: 460px; }
+  .eas-below img, .eas-below video { max-height: 170px; border-radius: 6px; }
+
+  .alert { border: 1px solid rgba(128,128,128,0.25); border-radius: 10px; padding: 0.85rem 1rem; margin-bottom: 0.7rem; overflow-wrap: break-word; }
+  .alert h3 { margin: 0.1rem 0 0.4rem; font-size: 1.05rem; }
+  .badges { display: flex; flex-wrap: wrap; gap: 0.35rem; align-items: center; }
+  .pill { font-size: 0.7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.02em; padding: 0.16rem 0.5rem; border-radius: 999px; color: #fff; white-space: nowrap; }
+  .pill-Extreme, .pill-Severe { background: #dc2626; }
+  .pill-Moderate { background: #d97706; }
+  .pill-Minor { background: #16a34a; }
+  .pill-Unknown { background: #6b7280; }
+  .badge { font-size: 0.7rem; font-weight: 700; padding: 0.16rem 0.5rem; border-radius: 999px; color: #fff; }
+  .badge-bi { background: #dc2626; }
+  .badge-wi { background: #2563eb; }
+  .badge-auto { background: #6b7280; }
+  .meta { font-size: 0.83rem; color: light-dark(#666, #9a9a9a); margin: 0.3rem 0; }
+  .desc { margin: 0.4rem 0; white-space: pre-wrap; }
+  .media { margin-top: 0.6rem; display: flex; flex-direction: column; gap: 0.5rem; }
+  .media img, .media video { max-width: 100%; border-radius: 8px; }
+  .media audio { width: 100%; max-width: 460px; }
+  .feed-actions { margin-top: 0.5rem; display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  #feed:empty::after { content: 'No alerts received yet.'; color: light-dark(#777, #999); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <h1>Live Broadcast Monitor</h1>
+  <span class="status" id="status"><span class="dot"></span><span id="statusText">idle</span></span>
+  <span class="spacer"></span>
+  <span class="who" id="who"></span>
+  <a href="/stream" class="who" id="streamLink" hidden>Stream</a>
+  <a href="/" class="who">Search</a>
+</div>
+
+<div id="gate"></div>
+
+<main id="app" hidden>
+  <div class="row" style="margin-bottom:0.5rem">
+    <button class="primary" id="armBtn">Arm &amp; go on air</button>
+    <button class="ghost" id="skipBtn" disabled>Skip current</button>
+    <button class="ghost" id="testBtn" title="Replay a stored alert through the monitor and any HLS streams">Send test alert</button>
+    <label class="hint" style="display:inline-flex;align-items:center;gap:0.35rem">
+      <input type="checkbox" id="autoplay" checked> Auto-play matching alerts
+    </label>
+  </div>
+
+  <details class="filters" id="filters">
+    <summary>Location &amp; auto-play filter <span class="hint" id="filterSummary"></span></summary>
+    <div class="filters-body">
+      <div class="field">
+        <label for="scope">Auto-play scope</label>
+        <select id="scope">
+          <option value="all">All alerts</option>
+          <option value="bi">Broadcast Immediate only</option>
+          <option value="biwi">Broadcast or Wireless Immediate</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Test alerts</label>
+        <label class="hint" style="font-weight:400;display:inline-flex;align-items:center;gap:0.4rem">
+          <input type="checkbox" id="includeTests" checked> Play test alerts
+        </label>
+      </div>
+      <div class="field">
+        <label>Provinces / territories</label>
+        <div class="provinces" id="provinces"></div>
+      </div>
+      <div class="field">
+        <label for="prefixes">Custom SGC code prefixes (comma-separated)</label>
+        <input type="text" id="prefixes" placeholder="e.g. 3520, 4711" style="width:100%">
+      </div>
+      <div class="field">
+        <label>Match by point &amp; radius (against the alert's polygon/circle)</label>
+        <div class="row">
+          <span><label for="lat" class="hint">Latitude</label><input type="number" id="lat" step="any" style="width:8rem"></span>
+          <span><label for="lon" class="hint">Longitude</label><input type="number" id="lon" step="any" style="width:8rem"></span>
+          <span><label for="radius" class="hint">Radius (km)</label><input type="number" id="radius" min="0" step="any" style="width:7rem" value="0"></span>
+          <button type="button" class="ghost" id="useLoc">Use my location</button>
+          <button type="button" class="ghost" id="clearLoc">Clear</button>
+        </div>
+      </div>
+      <p class="hint">With no province, prefix, or point set, every alert (within the scope above) auto-plays. Otherwise an alert auto-plays if it matches a prefix <strong>or</strong> the point.</p>
+    </div>
+  </details>
+
+  <div id="streamCard" hidden style="margin:0 0 1rem;border:1px solid rgba(128,128,128,0.3);border-radius:8px;padding:0.7rem 0.9rem">
+    <div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">
+      <strong style="font-size:0.9rem">Personal stream</strong>
+      <span class="hint">an unguessable link that plays only your filtered alerts — no login needed. Anyone with the link can watch; revoke to invalidate.</span>
+    </div>
+    <div id="streamKeys" style="margin-top:0.5rem;display:flex;flex-direction:column;gap:0.45rem"></div>
+    <div style="margin-top:0.55rem;display:flex;gap:0.5rem;flex-wrap:wrap">
+      <button type="button" class="ghost" id="mkStreamKey">Create stream link</button>
+      <button type="button" class="ghost" id="toggleStreamUrls" hidden>Show link</button>
+    </div>
+  </div>
+
+  <div id="nowWrap" class="idle">
+    <h2>On air <span class="queued" id="queued"></span></h2>
+    <div id="now"><span class="hint">Nothing playing.</span></div>
+  </div>
+
+  <h2 style="font-size:0.95rem">Recent alerts</h2>
+  <div id="feed"></div>
+</main>
+
+<audio id="pre" preload="auto"></audio>
+<audio id="tone" preload="auto"></audio>
+<audio id="main" preload="none"></audio>
+<audio id="post" preload="auto"></audio>
+
+<script>
+const $ = (id) => document.getElementById(id);
+function esc(s) {
+  return (s || '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function fmtDate(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? (iso || '') : d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+}
+
+// Statistics Canada SGC leading digits by province/territory.
+const SGC = { NL:'10', PE:'11', NS:'12', NB:'13', QC:'24', ON:'35', MB:'46', SK:'47', AB:'48', BC:'59', YT:'60', NT:'61', NU:'62' };
+const PREFS_KEY = 'naads.broadcast.filter';
+const MAX_TEXT_ONLY_MS = 20000; // how long a no-audio alert stays "on air"
+
+let me = { authEnabled: false, canBroadcast: true };
+// Fixed clips wrapping a broadcast-immediate alert (see /api/broadcast-audio):
+// pre-tone -> tone -> the alert's TTS audio -> post-message.
+let clips = { 'pre-tone': false, tone: false, 'post-message': false };
+let es = null;
+let filter = { autoplay: true, scope: 'all', provinces: [], prefixes: [], lat: null, lon: null, radiusKm: 0, includeTests: true };
+
+// Alert classification, mirrored from src/streamFilter.js.
+function isTestAlert(a) { return a.status === 'Test' || /\btest\b/i.test(a.event || ''); }
+function isUpdateNoise(a) { return /\b(changed|ended)\b/i.test(a.headline || ''); }
+function isEmergency(a) { return a.broadcastImmediate === true || a.wirelessImmediate === true; }
+
+// ---------- geo helpers ----------
+function haversineKm(a, b) {
+  const R = 6371, toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(b[0] - a[0]), dLon = toRad(b[1] - a[1]);
+  const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a[0])) * Math.cos(toRad(b[0])) * Math.sin(dLon / 2) ** 2;
+  return 2 * R * Math.asin(Math.sqrt(s));
+}
+// ring: [[lat,lon],...]; p: [lat,lon]. Ray casting on lon/lat plane.
+function pointInPolygon(p, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const yi = ring[i][0], xi = ring[i][1], yj = ring[j][0], xj = ring[j][1];
+    const intersect = (yi > p[0]) !== (yj > p[0]) && p[1] < ((xj - xi) * (p[0] - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+function alertHitsPoint(alert) {
+  if (filter.lat == null || filter.lon == null) return false;
+  const p = [filter.lat, filter.lon];
+  const r = Math.max(0, filter.radiusKm || 0);
+  for (const c of alert.circles || []) {
+    if (haversineKm(p, [c.lat, c.lon]) <= (c.radiusKm || 0) + r) return true;
+  }
+  for (const poly of alert.polygons || []) {
+    if (pointInPolygon(p, poly)) return true;
+    if (r > 0 && poly.some((v) => haversineKm(p, v) <= r)) return true;
+  }
+  return false;
+}
+function activePrefixes() {
+  const fromProv = filter.provinces.map((code) => SGC[code]).filter(Boolean);
+  return [...new Set([...fromProv, ...filter.prefixes])];
+}
+function shouldAutoPlay(alert) {
+  if (!filter.autoplay) return false;
+  if (isTestAlert(alert) && filter.includeTests === false) return false;
+  if (filter.scope === 'bi' && alert.broadcastImmediate !== true) return false;
+  if (filter.scope === 'biwi' && !isEmergency(alert)) return false;
+  const prefixes = activePrefixes();
+  const hasGeo = filter.lat != null && filter.lon != null;
+  if (!prefixes.length && !hasGeo) return true;
+  const geocodes = alert.geocodes || [];
+  const prefixMatch = prefixes.some((pfx) => geocodes.some((g) => String(g).startsWith(pfx)));
+  return prefixMatch || alertHitsPoint(alert);
+}
+
+// ---------- filter persistence ----------
+function readFilterInputs() {
+  filter.autoplay = $('autoplay').checked;
+  filter.scope = $('scope').value;
+  filter.provinces = [...document.querySelectorAll('#provinces input:checked')].map((el) => el.value);
+  filter.prefixes = $('prefixes').value.split(',').map((s) => s.trim()).filter(Boolean);
+  filter.lat = $('lat').value === '' ? null : Number($('lat').value);
+  filter.lon = $('lon').value === '' ? null : Number($('lon').value);
+  filter.radiusKm = Number($('radius').value) || 0;
+  filter.includeTests = $('includeTests').checked;
+  updateFilterSummary();
+}
+function writeFilterInputs() {
+  $('autoplay').checked = filter.autoplay !== false;
+  $('scope').value = filter.scope || 'all';
+  document.querySelectorAll('#provinces input').forEach((el) => { el.checked = (filter.provinces || []).includes(el.value); });
+  $('prefixes').value = (filter.prefixes || []).join(', ');
+  $('lat').value = filter.lat == null ? '' : filter.lat;
+  $('lon').value = filter.lon == null ? '' : filter.lon;
+  $('radius').value = filter.radiusKm || 0;
+  $('includeTests').checked = filter.includeTests !== false;
+  updateFilterSummary();
+}
+function updateFilterSummary() {
+  const bits = [];
+  if (filter.scope && filter.scope !== 'all') bits.push(filter.scope === 'bi' ? 'BI only' : 'BI/WI');
+  const p = activePrefixes();
+  if (p.length) bits.push(p.length + ' region' + (p.length === 1 ? '' : 's'));
+  if (filter.lat != null && filter.lon != null) bits.push('point');
+  if (filter.includeTests === false) bits.push('no tests');
+  if (!filter.autoplay) bits.push('auto-play off');
+  $('filterSummary').textContent = bits.length ? '· ' + bits.join(', ') : '· all alerts';
+}
+let saveTimer = null;
+function saveFilter() {
+  readFilterInputs();
+  try { localStorage.setItem(PREFS_KEY, JSON.stringify(filter)); } catch {}
+  if (me.authEnabled && me.canBroadcast) {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      fetch('/api/broadcast-prefs', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(filter),
+      }).catch(() => {});
+    }, 500);
+  }
+}
+async function loadFilter() {
+  let loaded = null;
+  if (me.authEnabled && me.canBroadcast) {
+    try {
+      const r = await fetch('/api/broadcast-prefs');
+      if (r.ok) { const j = await r.json(); if (j && Object.keys(j).length) loaded = j; }
+    } catch {}
+  }
+  if (!loaded) {
+    try { loaded = JSON.parse(localStorage.getItem(PREFS_KEY) || 'null'); } catch {}
+  }
+  if (loaded) filter = Object.assign(filter, loaded);
+  writeFilterInputs();
+}
+
+// ---------- playback ----------
+const queue = [];
+let playing = null;
+// One <audio> per step of the sequence, each used once, so a later step's
+// src change can never abort an earlier step that's still playing.
+const preEl = $('pre');
+const toneEl = $('tone');
+const mainEl = $('main');
+const postEl = $('post');
+const seqEls = [preEl, toneEl, mainEl, postEl];
+
+function playEl(el, src) {
+  return new Promise((resolve) => {
+    let done = false;
+    let watchdog = null;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(watchdog);
+      el.removeEventListener('ended', finish);
+      el.removeEventListener('error', finish);
+      resolve();
+    };
+    el.addEventListener('ended', finish);
+    el.addEventListener('error', finish);
+    if (src) el.src = src; else el.removeAttribute('src');
+    el.load();
+    try { el.currentTime = 0; } catch {}
+    // Belt-and-suspenders: if a clip neither ends nor errors (stuck load),
+    // don't wedge the queue.
+    watchdog = setTimeout(finish, 180000);
+    const attempt = () => Promise.resolve(el.play()).catch((err) => {
+      // NotAllowedError = the browser blocked autoplay -> surface and move on.
+      // Anything else (AbortError from a load race, transient decode) -> wait
+      // for the element to be ready and try once more before giving up, so a
+      // clip like the post-message isn't skipped.
+      if (err && err.name === 'NotAllowedError') {
+        setStatus('error', 'audio blocked by the browser — click the page, then re-Arm');
+        return finish();
+      }
+      el.addEventListener('canplay', () => { el.play().catch(finish); }, { once: true });
+    });
+    attempt();
+  });
+}
+// Interruptible sleep: Skip (or the end of an alert) resolves it early.
+let pumpTimer = null;
+let pumpResolve = null;
+let skipRequested = false;
+function wait(ms) {
+  return new Promise((resolve) => {
+    clearTimeout(pumpTimer);
+    pumpResolve = resolve;
+    pumpTimer = setTimeout(() => { pumpResolve = null; resolve(); }, ms);
+  });
+}
+function endWait() {
+  clearTimeout(pumpTimer);
+  if (pumpResolve) { const r = pumpResolve; pumpResolve = null; r(); }
+}
+
+// Every alert holds the on-air slot at least this long, so a fast, blocked,
+// or text-only alert still registers on screen and the next one visibly
+// queues behind it instead of instantly replacing it.
+const MIN_ON_AIR_MS = 6000;
+
+function updateQueued() {
+  $('queued').textContent = queue.length ? '· ' + queue.length + ' waiting' : '';
+  $('skipBtn').disabled = !playing;
+}
+
+async function runSequence(alert) {
+  renderNow(alert);
+  const startedAt = Date.now();
+  // Pre-tone / Alert Ready tone / Post-message wrap emergency alerts only
+  // (Broadcast or Wireless Immediate); other alerts just play their audio.
+  const formal = isEmergency(alert);
+  const audioRes = (alert.resources || []).find((r) => (r.mimeType || '').startsWith('audio/'));
+  if (!skipRequested && formal && clips['pre-tone']) await playEl(preEl, '/api/broadcast-audio/pre-tone');
+  if (!skipRequested && formal && clips.tone) await playEl(toneEl, '/api/broadcast-audio/tone');
+  if (!skipRequested && audioRes) await playEl(mainEl, '/api/resource/' + audioRes.id);
+  else if (!skipRequested) await wait(MAX_TEXT_ONLY_MS);
+  const remaining = MIN_ON_AIR_MS - (Date.now() - startedAt);
+  if (!skipRequested && remaining > 0) await wait(remaining);
+  // Post-message plays last and is always allowed to finish (not gated by the
+  // min-dwell), so retriggering the alert can't clip it.
+  if (!skipRequested && formal && clips['post-message']) await playEl(postEl, '/api/broadcast-audio/post-message');
+}
+async function pump() {
+  if (playing || !queue.length) { updateQueued(); return; }
+  playing = queue.shift();
+  skipRequested = false;
+  updateQueued();
+  try { await runSequence(playing); } catch {}
+  playing = null;
+  skipRequested = false;
+  endWait();
+  updateQueued();
+  if (queue.length) pump(); else renderNow(null);
+}
+function enqueue(alert) {
+  queue.push(alert);
+  updateQueued();
+  pump();
+}
+function skipCurrent() {
+  if (!playing) return;
+  skipRequested = true;
+  endWait();
+  for (const el of seqEls) { try { el.pause(); } catch {} el.dispatchEvent(new Event('ended')); }
+}
+$('skipBtn').addEventListener('click', skipCurrent);
+
+// ---------- rendering ----------
+function badgesHtml(a, opts = {}) {
+  const sev = ['Extreme', 'Severe', 'Moderate', 'Minor'].includes(a.severity) ? a.severity : 'Unknown';
+  return '<div class="badges">' +
+    '<span class="pill pill-' + sev + '">' + esc(a.severity || 'Unknown') + '</span>' +
+    (a.broadcastImmediate ? '<span class="badge badge-bi" title="Broadcast Immediate">BI</span>' : '') +
+    (a.wirelessImmediate ? '<span class="badge badge-wi" title="Wireless Immediate">WI</span>' : '') +
+    (opts.auto ? '<span class="badge badge-auto">AUTO</span>' : '') +
+    '</div>';
+}
+function mediaHtml(a) {
+  const parts = [];
+  for (const r of a.resources || []) {
+    const mime = r.mimeType || '';
+    const src = '/api/resource/' + r.id;
+    if (mime.startsWith('image/')) parts.push('<img alt="' + esc(r.resourceDesc || 'image') + '" src="' + src + '">');
+    else if (mime.startsWith('video/')) parts.push('<video controls preload="metadata" src="' + src + '"></video>');
+    else if (mime.startsWith('audio/')) parts.push('<audio controls preload="none" src="' + src + '"></audio>');
+    else parts.push('<a href="' + src + '" target="_blank" rel="noopener">' + esc(r.resourceDesc || mime || 'attachment') + '</a>');
+  }
+  return parts.length ? '<div class="media">' + parts.join('') + '</div>' : '';
+}
+function alertInner(a, opts) {
+  return badgesHtml(a, opts) +
+    '<h3>' + esc(a.headline || a.event || '(no headline)') + '</h3>' +
+    '<div class="meta">' + fmtDate(a.sent) + ' · ' + esc(a.event || 'unknown') + ' · urgency: ' + esc(a.urgency || '?') +
+    ' · ' + esc(a.source || a.sender || '') + '</div>' +
+    (a.areaDesc ? '<div class="meta">Area: ' + esc(a.areaDesc) + '</div>' : '') +
+    (a.description ? '<div class="desc">' + esc(a.description) + '</div>' : '') +
+    (a.instruction ? '<div class="desc"><strong>Instruction:</strong> ' + esc(a.instruction) + '</div>' : '') +
+    mediaHtml(a) +
+    '<div class="feed-actions"><a href="/api/alert/' + a.id + '/xml" target="_blank" rel="noopener">raw CAP-CP XML</a></div>';
+}
+// Split the message into screen-sized pages on word boundaries, like a CAP
+// visual alert's "1 / N" pagination.
+function paginateText(text, perPage) {
+  text = (text || '').replace(/\s*\n\s*\n\s*/g, '\n\n').trim();
+  if (!text) return [];
+  const words = text.split(/\s+/);
+  const pages = [];
+  let cur = '';
+  for (const w of words) {
+    if (cur.length && cur.length + 1 + w.length > perPage) { pages.push(cur); cur = w; }
+    else cur = cur ? cur + ' ' + w : w;
+  }
+  if (cur) pages.push(cur);
+  return pages;
+}
+
+let easPageTimer = null;
+const EAS_PAGE_MS = 9000;
+function stopEasPaging() { clearInterval(easPageTimer); easPageTimer = null; }
+
+function renderNow(a) {
+  const wrap = $('nowWrap');
+  stopEasPaging();
+  if (!a) {
+    wrap.classList.remove('onair');
+    wrap.classList.add('idle');
+    $('now').innerHTML = '<span class="hint">Nothing playing.</span>';
+    updateQueued();
+    return;
+  }
+  // Grey for tests; red "EMERGENCY ALERT" only for Broadcast/Wireless
+  // Immediate; amber for anything else.
+  const variant = isTestAlert(a) ? 'test' : isEmergency(a) ? 'emergency' : 'advisory';
+  const kicker = variant === 'test' ? 'Test Alert' : variant === 'emergency' ? 'Emergency Alert' : (a.event || 'Alert');
+  wrap.className = 'onair ' + variant;
+
+  const hasAudio = (a.resources || []).some((r) => (r.mimeType || '').startsWith('audio/'));
+  // Prefer the SOREM Broadcast_Text -- the exact script the on-air TTS reads.
+  // Fall back to the public description/instruction when it's absent.
+  const onAirText = a.broadcastText || [a.description, a.instruction].filter(Boolean).join('\n\n');
+  const pages = paginateText(onAirText, 360);
+  const total = Math.max(1, pages.length);
+  const firstPage = pages[0] || (hasAudio ? 'Listen to the broadcast audio below.' : 'No message text provided.');
+
+  const media = [];
+  for (const r of a.resources || []) {
+    const mime = r.mimeType || '', src = '/api/resource/' + r.id;
+    if (mime.startsWith('image/')) media.push('<img alt="" src="' + src + '">');
+    else if (mime.startsWith('audio/')) media.push('<audio controls preload="none" src="' + src + '"></audio>');
+    else if (mime.startsWith('video/')) media.push('<video controls preload="metadata" src="' + src + '"></video>');
+  }
+
+  $('now').innerHTML =
+    '<div class="eas ' + variant + '">' +
+      '<div class="eas-kicker">' + esc(kicker) + '</div>' +
+      (a.headline ? '<div class="eas-headline">' + esc(a.headline) + '</div>' : '') +
+      '<div class="eas-body" id="easBody">' + esc(firstPage) + '</div>' +
+      '<div class="eas-meta">' + esc(a.event || 'Alert') + (a.areaDesc ? ' — ' + esc(a.areaDesc) : '') + ' · ' + esc(fmtDate(a.sent)) + '</div>' +
+      '<div class="eas-page" id="easPage">1 / ' + total + '</div>' +
+    '</div>' +
+    (media.length ? '<div class="eas-below">' + media.join('') + '</div>' : '') +
+    (hasAudio ? '' : '<div class="hint" style="margin-top:0.4rem">No broadcast audio on this alert — text on screen for ' + (MAX_TEXT_ONLY_MS / 1000) + 's.</div>');
+
+  if (total > 1) {
+    let i = 0;
+    easPageTimer = setInterval(() => {
+      const body = $('easBody'), pg = $('easPage');
+      if (!body || !pg) { stopEasPaging(); return; }
+      i = (i + 1) % total;
+      body.textContent = pages[i];
+      pg.textContent = (i + 1) + ' / ' + total;
+    }, EAS_PAGE_MS);
+  }
+}
+function addToFeed(a, auto) {
+  const feed = $('feed');
+  const div = document.createElement('div');
+  div.className = 'alert';
+  div.innerHTML = alertInner(a, { auto });
+  const btn = document.createElement('button');
+  btn.className = 'ghost';
+  btn.textContent = 'Play now';
+  btn.addEventListener('click', () => enqueue(a));
+  div.querySelector('.feed-actions').prepend(btn);
+  feed.prepend(div);
+  while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+}
+function handleAlert(a) {
+  if (a.manualTest) { addToFeed(a, true); enqueue(a); return; } // operator test: always play
+  if (isUpdateNoise(a)) return; // "... changed" re-issues aren't useful on air
+  const auto = shouldAutoPlay(a);
+  addToFeed(a, auto);
+  if (auto) enqueue(a);
+}
+
+// ---------- connection ----------
+function setStatus(kind, text) {
+  $('status').className = 'status ' + kind;
+  $('statusText').textContent = text;
+}
+function connect() {
+  if (es) es.close();
+  setStatus('connecting', 'connecting…');
+  es = new EventSource('/api/stream');
+  es.addEventListener('hello', () => setStatus('live', 'live'));
+  es.addEventListener('alert', (e) => {
+    try { handleAlert(JSON.parse(e.data)); } catch {}
+  });
+  es.onopen = () => setStatus('live', 'live');
+  es.onerror = () => setStatus('error', 'reconnecting…');
+}
+// A ~0.05s silent WAV, built once. Playing a real source to a pause inside
+// the click gesture is what actually clears an <audio> element's autoplay
+// gate for later scripted play() calls -- calling play() on a src-less
+// element does not reliably count.
+let SILENT_URL = null;
+function silentWavUrl() {
+  if (SILENT_URL) return SILENT_URL;
+  const sr = 8000, n = 400;
+  const buf = new ArrayBuffer(44 + n), dv = new DataView(buf);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n, true); w(8, 'WAVE'); w(12, 'fmt ');
+  dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, sr, true); dv.setUint32(28, sr, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true);
+  w(36, 'data'); dv.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) dv.setUint8(44 + i, 128); // 8-bit silence
+  SILENT_URL = URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+  return SILENT_URL;
+}
+function unlockAudio(el) {
+  try {
+    el.muted = true;
+    el.src = silentWavUrl();
+    el.load();
+    Promise.resolve(el.play()).then(
+      () => { try { el.pause(); el.currentTime = 0; } catch {} el.removeAttribute('src'); el.muted = false; },
+      () => { el.removeAttribute('src'); el.muted = false; }
+    );
+  } catch { el.muted = false; }
+}
+let armed = false;
+function arm() {
+  seqEls.forEach(unlockAudio);
+  armed = true;
+  $('armBtn').disabled = true;
+  $('armBtn').textContent = 'On air';
+  connect();
+}
+
+// ---------- init ----------
+function buildProvinceBoxes() {
+  $('provinces').innerHTML = Object.keys(SGC).map((code) =>
+    '<label><input type="checkbox" value="' + code + '"> ' + code + '</label>'
+  ).join('');
+}
+function wireFilterEvents() {
+  ['autoplay', 'scope', 'prefixes', 'lat', 'lon', 'radius', 'includeTests'].forEach((id) => {
+    $(id).addEventListener('change', saveFilter);
+    $(id).addEventListener('input', saveFilter);
+  });
+  $('provinces').addEventListener('change', saveFilter);
+  $('useLoc').addEventListener('click', () => {
+    if (!navigator.geolocation) return;
+    navigator.geolocation.getCurrentPosition((pos) => {
+      $('lat').value = pos.coords.latitude.toFixed(5);
+      $('lon').value = pos.coords.longitude.toFixed(5);
+      saveFilter();
+    });
+  });
+  $('clearLoc').addEventListener('click', () => { $('lat').value = ''; $('lon').value = ''; $('radius').value = 0; saveFilter(); });
+}
+async function sendTestAlert() {
+  const btn = $('testBtn');
+  btn.disabled = true;
+  const label = btn.textContent;
+  try {
+    const r = await fetch('/api/broadcast-test', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    btn.textContent = r.ok ? 'Test sent' : (d.error || 'Test failed');
+  } catch {
+    btn.textContent = 'Test failed';
+  }
+  setTimeout(() => { btn.textContent = label; btn.disabled = false; }, 4000);
+}
+
+async function init() {
+  buildProvinceBoxes();
+  wireFilterEvents();
+  $('armBtn').addEventListener('click', arm);
+  $('testBtn').addEventListener('click', sendTestAlert);
+
+  try {
+    const r = await fetch('/api/me');
+    if (r.ok) me = await r.json();
+  } catch {}
+
+  if (me.streamEnabled) $('streamLink').hidden = false;
+
+  if (me.authEnabled) {
+    $('who').textContent = me.username ? me.username + ' · ' : '';
+    const out = document.createElement('a');
+    out.href = '#'; out.className = 'who'; out.textContent = 'Log out';
+    out.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await fetch('/api/logout', { method: 'POST' });
+      location.href = '/login';
+    });
+    $('who').appendChild(out);
+  }
+
+  if (me.authEnabled && !me.canBroadcast) {
+    $('gate').innerHTML = '<div class="notice"><strong>Broadcast access requires a full account.</strong><br>' +
+      'You are signed in as a guest. <a href="/">Go to search</a> or <a href="/login">sign in</a> with a broadcast account.</div>';
+    setStatus('', 'no access');
+    return;
+  }
+
+  await loadFilter();
+  $('app').hidden = false;
+
+  if (me.streamEnabled) {
+    $('streamCard').hidden = false;
+    $('mkStreamKey').addEventListener('click', createStreamKey);
+    $('toggleStreamUrls').addEventListener('click', () => { revealStreamUrls = !revealStreamUrls; loadStreamKeys(); });
+    loadStreamKeys();
+  }
+
+  await Promise.all(Object.keys(clips).map(async (slot) => {
+    try { clips[slot] = (await fetch('/api/broadcast-audio/' + slot, { method: 'HEAD' })).ok; } catch { clips[slot] = false; }
+  }));
+}
+
+// Keep the secret part of the link masked by default (screen-shares,
+// shoulder-surfing); Copy still copies the real URL.
+let revealStreamUrls = false;
+function maskUrl(url) {
+  return revealStreamUrls ? url : url.replace(/(\/s\/)[a-f0-9]+/i, '$1' + '•'.repeat(16));
+}
+
+async function loadStreamKeys() {
+  let keys = [];
+  try {
+    const r = await fetch('/api/stream-keys');
+    if (r.ok) keys = (await r.json()).keys || [];
+  } catch {}
+  const box = $('streamKeys');
+  box.innerHTML = '';
+  $('toggleStreamUrls').hidden = keys.length === 0;
+  $('toggleStreamUrls').textContent = revealStreamUrls ? 'Hide link' : 'Show link';
+  for (const k of keys) {
+    const url = location.origin + k.page;
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;gap:0.4rem;align-items:center;flex-wrap:wrap;font-size:0.85rem';
+    const code = document.createElement('code');
+    code.textContent = maskUrl(url);
+    code.style.cssText = 'flex:1;min-width:220px;overflow:hidden;text-overflow:ellipsis';
+    const copy = document.createElement('button');
+    copy.className = 'ghost'; copy.textContent = 'Copy';
+    copy.addEventListener('click', () => { try { navigator.clipboard.writeText(url); copy.textContent = 'Copied'; setTimeout(() => (copy.textContent = 'Copy'), 1200); } catch {} });
+    const open = document.createElement('a');
+    open.href = k.page; open.target = '_blank'; open.rel = 'noopener'; open.textContent = 'Open'; open.className = 'who';
+    const m3u8 = document.createElement('a');
+    m3u8.href = k.url; m3u8.target = '_blank'; m3u8.rel = 'noopener'; m3u8.textContent = '.m3u8'; m3u8.className = 'who';
+    const del = document.createElement('button');
+    del.className = 'ghost'; del.textContent = 'Revoke';
+    del.addEventListener('click', async () => { if (!confirm('Revoke this stream link?')) return; await fetch('/api/stream-keys/' + encodeURIComponent(k.key), { method: 'DELETE' }); loadStreamKeys(); });
+    row.append(code, copy, open, m3u8, del);
+    if (k.boundToUser) { const t = document.createElement('span'); t.className = 'hint'; t.textContent = '· follows your filter'; row.append(t); }
+    box.appendChild(row);
+  }
+}
+
+async function createStreamKey() {
+  readFilterInputs();
+  const payload = me.authEnabled ? { fromPrefs: true, label: 'monitor' } : { filter, label: 'monitor' };
+  try {
+    const r = await fetch('/api/stream-keys', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    if (r.ok) loadStreamKeys();
+  } catch {}
+}
+
+init();
+</script>
+</body>
+</html>

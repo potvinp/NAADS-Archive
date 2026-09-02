@@ -36,6 +36,50 @@ function parseGeocodes(area) {
 }
 
 /**
+ * Parses one CAP <polygon> ("lat,lon lat,lon ..." space-separated pairs)
+ * into [[lat, lon], ...]. Returns null unless it has at least 3 valid
+ * points (a degenerate ring is useless for point-in-polygon tests).
+ */
+function parsePolygon(str) {
+  if (!str || typeof str !== 'string') return null;
+  const points = str
+    .trim()
+    .split(/\s+/)
+    .map((pair) => {
+      const [lat, lon] = pair.split(',').map(Number);
+      return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+    })
+    .filter(Boolean);
+  return points.length >= 3 ? points : null;
+}
+
+function parsePolygons(area) {
+  if (!area || !area.polygon) return [];
+  const list = Array.isArray(area.polygon) ? area.polygon : [area.polygon];
+  return list.map((p) => parsePolygon(textOf(p))).filter(Boolean);
+}
+
+/**
+ * Parses one CAP <circle> ("lat,lon radiusKm") into { lat, lon, radiusKm }.
+ * Per the CAP spec the radius is in kilometres.
+ */
+function parseCircle(str) {
+  if (!str || typeof str !== 'string') return null;
+  const [center, radiusRaw] = str.trim().split(/\s+/);
+  if (!center) return null;
+  const [lat, lon] = center.split(',').map(Number);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const radiusKm = Number(radiusRaw);
+  return { lat, lon, radiusKm: Number.isFinite(radiusKm) ? radiusKm : 0 };
+}
+
+function parseCircles(area) {
+  if (!area || !area.circle) return [];
+  const list = Array.isArray(area.circle) ? area.circle : [area.circle];
+  return list.map((c) => parseCircle(textOf(c))).filter(Boolean);
+}
+
+/**
  * Parses an <info> block's <resource> attachments (audio/image/etc). Per
  * the CAP-CP spec, an attachment may be embedded as base64 in <derefUri>,
  * linked externally via <uri>, or both.
@@ -90,6 +134,20 @@ function parseImmediateFlags(parameters) {
 }
 
 /**
+ * The "layer:SOREM:1.0:Broadcast_Text" <parameter>, if present: the exact
+ * script NAADS feeds to its text-to-speech engine to generate the alert's
+ * broadcast audio. It's the authoritative on-air wording (often differing
+ * from the public <description>), so the broadcast feed shows this verbatim.
+ * Matched by suffix so a future SOREM layer revision still resolves.
+ */
+function parseBroadcastText(parameters) {
+  for (const { valueName, value } of parameters) {
+    if (valueName && /:Broadcast_Text$/i.test(valueName) && value) return value;
+  }
+  return null;
+}
+
+/**
  * Parses a raw CAP-CP XML alert message (as received from the NAADS archive
  * or TCP streaming feed) into a plain object suitable for storage.
  * Returns null if the XML does not look like a CAP <alert> document.
@@ -114,7 +172,11 @@ function parseCapAlert(xml) {
     const areas = info.area ? (Array.isArray(info.area) ? info.area : [info.area]) : [];
     const areaDesc = areas.map(parseAreaDesc).filter(Boolean).join('; ') || null;
     const geocodes = areas.map(parseGeocodes).filter(Boolean).join(',') || null;
-    const { broadcastImmediate, wirelessImmediate } = parseImmediateFlags(parseParameters(info));
+    const polygons = areas.flatMap(parsePolygons);
+    const circles = areas.flatMap(parseCircles);
+    const parameters = parseParameters(info);
+    const { broadcastImmediate, wirelessImmediate } = parseImmediateFlags(parameters);
+    const broadcastText = parseBroadcastText(parameters);
     return {
       language: textOf(info.language),
       category: textOf(info.category),
@@ -133,8 +195,11 @@ function parseCapAlert(xml) {
       web: textOf(info.web),
       areaDesc,
       geocodes,
+      polygons,
+      circles,
       broadcastImmediate,
       wirelessImmediate,
+      broadcastText,
       resources: parseResources(info),
     };
   });

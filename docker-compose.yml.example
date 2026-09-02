@@ -11,6 +11,18 @@ services:
       # Uncomment (and the postgres service + depends_on below) to use
       # PostgreSQL instead of the bundled SQLite file:
       # - DATABASE_URL=postgresql://naads:naads@postgres:5432/naads
+      # Live broadcast feed: override the bundled attention/pre/post clips.
+      # - NAADS_ALERT_TONE=/app/audio/Tone-v2.mp3
+      # - NAADS_PRE_TONE=/app/audio/Pre-Tone.wav
+      # - NAADS_POST_MESSAGE=/app/audio/Post-Message.wav
+      # - NAADS_BROADCAST_LANG=en
+      # Optional multi-user auth (unset = app is open, as before):
+      # - NAADS_AUTH=1
+      # - NAADS_GUEST=0
+      # - NAADS_AUTH_SECURE=1
+      # - NAADS_SESSION_TTL_HOURS=720
+      # - NAADS_ADMIN_USER=admin
+      # - NAADS_ADMIN_PASS=change-me
     # depends_on:
     #   - postgres
     restart: unless-stopped

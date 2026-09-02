@@ -1,0 +1,26 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "public/index.html"
+        ],
+        "createdAt": "2026-09-02T18:12:25.523Z",
+        "reason": "pre-existing site design system: compact utilitarian type scale established in public/index.html before this change; not introduced here"
+      },
+      {
+        "rule": "flat-type-hierarchy",
+        "value": "*",
+        "files": [
+          "public/broadcast.html"
+        ],
+        "createdAt": "2026-09-02T18:12:25.564Z",
+        "reason": "matches established design system: approved plan specified broadcast.html use the same conventions as public/index.html, whose type scale predates this work"
+      }
+    ]
+  }
+}

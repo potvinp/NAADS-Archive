@@ -53,6 +53,9 @@ CREATE TABLE IF NOT EXISTS alert_info (
   geocodes      TEXT,
   broadcast_immediate BOOLEAN,
   wireless_immediate  BOOLEAN,
+  polygons      TEXT,
+  circles       TEXT,
+  broadcast_text TEXT,
   search_vector TSVECTOR GENERATED ALWAYS AS (
     setweight(to_tsvector('english', coalesce(headline, '')), 'A') ||
     setweight(to_tsvector('english', coalesce(event, '')), 'A') ||
@@ -71,6 +74,14 @@ CREATE TABLE IF NOT EXISTS alert_info (
 -- below that reference them.
 ALTER TABLE alert_info ADD COLUMN IF NOT EXISTS broadcast_immediate BOOLEAN;
 ALTER TABLE alert_info ADD COLUMN IF NOT EXISTS wireless_immediate BOOLEAN;
+-- Structured area geometry (JSON text): polygons [[[lat,lon],...],...],
+-- circles [{lat,lon,radiusKm},...]. Used by the live broadcast feed's
+-- location filter; the flattened area_desc/geocodes columns are kept for
+-- search.
+ALTER TABLE alert_info ADD COLUMN IF NOT EXISTS polygons TEXT;
+ALTER TABLE alert_info ADD COLUMN IF NOT EXISTS circles TEXT;
+-- "layer:SOREM:1.0:Broadcast_Text": the exact script NAADS TTS reads on air.
+ALTER TABLE alert_info ADD COLUMN IF NOT EXISTS broadcast_text TEXT;
 
 CREATE INDEX IF NOT EXISTS idx_info_alert_id ON alert_info(alert_id);
 CREATE INDEX IF NOT EXISTS idx_info_event ON alert_info(event);
@@ -99,6 +110,40 @@ CREATE TABLE IF NOT EXISTS poll_state (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Optional auth (only consulted when NAADS_AUTH is set; see src/auth.js).
+-- The reserved username 'guest' backs no-credential guest sessions and has
+-- an empty pass_hash (unusable for password login).
+CREATE TABLE IF NOT EXISTS users (
+  id              SERIAL PRIMARY KEY,
+  username        TEXT NOT NULL UNIQUE,
+  pass_hash       TEXT NOT NULL,
+  role            TEXT NOT NULL DEFAULT 'user',
+  broadcast_prefs TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id          TEXT PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  expires_at  TIMESTAMPTZ NOT NULL,
+  user_agent  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+-- Capability URLs for a personal HLS stream: whoever holds the key can pull
+-- /hls/s/<key>/live.m3u8 with no login.
+CREATE TABLE IF NOT EXISTS stream_keys (
+  key          TEXT PRIMARY KEY,
+  user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  filter       TEXT,
+  label        TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  last_used_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_stream_keys_user_id ON stream_keys(user_id);
 `;
 
 // Schema setup runs once per process, lazily on first query, and is cached
@@ -112,6 +157,22 @@ function ensureSchema() {
     });
   }
   return schemaReady;
+}
+
+// Serialize parsed polygon/circle arrays for storage; null (not "[]") when
+// the info block carries no geometry, so a NULL column is unambiguous.
+function geomJson(value) {
+  return value && value.length ? JSON.stringify(value) : null;
+}
+
+function parseGeom(json) {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -191,8 +252,8 @@ async function insertAlert(parsedAlert, rawXml, fetchedFrom) {
       const infoRes = await client.query(
         `INSERT INTO alert_info (alert_id, language, category, event, response_type, urgency, severity, certainty,
            effective, onset, expires, sender_name, headline, description, instruction, web, area_desc, geocodes,
-           broadcast_immediate, wireless_immediate)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+           broadcast_immediate, wireless_immediate, polygons, circles, broadcast_text)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          RETURNING id`,
         [
           alertId,
@@ -215,6 +276,9 @@ async function insertAlert(parsedAlert, rawXml, fetchedFrom) {
           infoBlock.geocodes || null,
           infoBlock.broadcastImmediate ?? null,
           infoBlock.wirelessImmediate ?? null,
+          geomJson(infoBlock.polygons),
+          geomJson(infoBlock.circles),
+          infoBlock.broadcastText || null,
         ]
       );
       await insertResources(client, infoRes.rows[0].id, infoBlock.resources);
@@ -410,10 +474,12 @@ async function backfillResourcesForAlert(alertId, parsedInfos) {
   }
 }
 
-// --- Flag backfill (for alerts stored before BI/WI parameter parsing existed) ---
+// --- Flag backfill (for alerts stored before the SOREM <parameter> parsing
+// existed): recomputes broadcast_immediate / wireless_immediate and the
+// broadcast_text script, all from the same <parameter> list. ---
 
 const FLAG_CANDIDATE_WHERE = `
-  raw_xml LIKE '%Broadcast_Immediately%' OR raw_xml LIKE '%Broadcast_Intrusive%' OR raw_xml LIKE '%WirelessImmediate%'
+  raw_xml LIKE '%Broadcast_Immediately%' OR raw_xml LIKE '%Broadcast_Intrusive%' OR raw_xml LIKE '%WirelessImmediate%' OR raw_xml LIKE '%Broadcast_Text%'
 `;
 
 /**
@@ -453,7 +519,7 @@ async function backfillFlagsForAlert(alertId, parsedInfos) {
   const client = await pool.connect();
   try {
     const infoRows = (await client.query(
-      'SELECT id, broadcast_immediate, wireless_immediate FROM alert_info WHERE alert_id = $1 ORDER BY id ASC',
+      'SELECT id, broadcast_immediate, wireless_immediate, broadcast_text FROM alert_info WHERE alert_id = $1 ORDER BY id ASC',
       [alertId]
     )).rows;
 
@@ -468,10 +534,77 @@ async function backfillFlagsForAlert(alertId, parsedInfos) {
     for (let i = 0; i < infoRows.length; i++) {
       const newBI = parsedInfos[i].broadcastImmediate ?? null;
       const newWI = parsedInfos[i].wirelessImmediate ?? null;
-      if (infoRows[i].broadcast_immediate === newBI && infoRows[i].wireless_immediate === newWI) continue;
+      const newText = parsedInfos[i].broadcastText || null;
+      if (
+        infoRows[i].broadcast_immediate === newBI &&
+        infoRows[i].wireless_immediate === newWI &&
+        (infoRows[i].broadcast_text || null) === newText
+      ) continue;
       await client.query(
-        'UPDATE alert_info SET broadcast_immediate = $1, wireless_immediate = $2 WHERE id = $3',
-        [newBI, newWI, infoRows[i].id]
+        'UPDATE alert_info SET broadcast_immediate = $1, wireless_immediate = $2, broadcast_text = $3 WHERE id = $4',
+        [newBI, newWI, newText, infoRows[i].id]
+      );
+      updated++;
+    }
+    await client.query('COMMIT');
+    return updated;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+// --- Geometry backfill (for alerts stored before polygon/circle parsing) ---
+
+const GEO_CANDIDATE_WHERE = `raw_xml LIKE '%<polygon%' OR raw_xml LIKE '%<circle%'`;
+
+async function getCandidateAlertsForGeoBackfill(limit, offset) {
+  await ensureSchema();
+  const res = await pool.query(
+    `SELECT id, raw_xml FROM alerts WHERE ${GEO_CANDIDATE_WHERE} ORDER BY id ASC LIMIT $1 OFFSET $2`,
+    [limit, offset]
+  );
+  return res.rows;
+}
+
+async function countCandidateAlertsForGeoBackfill() {
+  await ensureSchema();
+  const res = await pool.query(`SELECT COUNT(*)::int c FROM alerts WHERE ${GEO_CANDIDATE_WHERE}`);
+  return res.rows[0].c;
+}
+
+/**
+ * Re-parses an already-stored alert's raw XML and (re)writes its structured
+ * polygon/circle geometry. Overwrites rather than skipping (like the flag
+ * backfill), and is idempotent, so safe to re-run.
+ * Returns the number of alert_info rows whose geometry actually changed.
+ */
+async function backfillGeoForAlert(alertId, parsedInfos) {
+  await ensureSchema();
+  const client = await pool.connect();
+  try {
+    const infoRows = (await client.query(
+      'SELECT id, polygons, circles FROM alert_info WHERE alert_id = $1 ORDER BY id ASC',
+      [alertId]
+    )).rows;
+
+    if (infoRows.length !== parsedInfos.length) {
+      throw new Error(
+        `info block count mismatch (stored ${infoRows.length}, parsed ${parsedInfos.length})`
+      );
+    }
+
+    await client.query('BEGIN');
+    let updated = 0;
+    for (let i = 0; i < infoRows.length; i++) {
+      const newPoly = geomJson(parsedInfos[i].polygons);
+      const newCirc = geomJson(parsedInfos[i].circles);
+      if ((infoRows[i].polygons ?? null) === newPoly && (infoRows[i].circles ?? null) === newCirc) continue;
+      await client.query(
+        'UPDATE alert_info SET polygons = $1, circles = $2 WHERE id = $3',
+        [newPoly, newCirc, infoRows[i].id]
       );
       updated++;
     }
@@ -486,9 +619,66 @@ async function backfillFlagsForAlert(alertId, parsedInfos) {
 }
 
 /**
- * Total number of alerts matching the given filters (ignoring limit/offset),
- * for computing page counts.
+ * One alert shaped for the live broadcast feed (see src/alertBus.js): the
+ * alert plus a single <info> block (preferring the given language prefix,
+ * else the first) with its attachments and parsed area geometry. Separate
+ * from searchAlerts() so the hot search path is untouched.
  */
+async function getAlertForBroadcast(id, { language } = {}) {
+  await ensureSchema();
+  const alertRes = await pool.query(
+    `SELECT id, identifier, sender, sent, status, source, msg_type, scope FROM alerts WHERE id = $1 AND is_heartbeat = FALSE`,
+    [id]
+  );
+  const alert = alertRes.rows[0];
+  if (!alert) return null;
+
+  const infos = (await pool.query(`SELECT * FROM alert_info WHERE alert_id = $1 ORDER BY id ASC`, [id])).rows;
+  if (!infos.length) return null;
+
+  let info = infos[0];
+  if (language) {
+    const want = language.toLowerCase();
+    const pref = infos.find((r) => (r.language || '').toLowerCase().startsWith(want));
+    if (pref) info = pref;
+  }
+
+  const resourcesByInfoId = await getResourcesByInfoIds([info.id]);
+  const resources = resourcesByInfoId[info.id] || [];
+
+  return {
+    id: alert.id,
+    identifier: alert.identifier,
+    sender: alert.sender,
+    sent: alert.sent,
+    status: alert.status,
+    source: alert.source,
+    language: info.language,
+    event: info.event,
+    headline: info.headline,
+    description: info.description,
+    instruction: info.instruction,
+    severity: info.severity,
+    urgency: info.urgency,
+    certainty: info.certainty,
+    areaDesc: info.area_desc,
+    broadcastText: info.broadcast_text || null,
+    broadcastImmediate: info.broadcast_immediate ?? null,
+    wirelessImmediate: info.wireless_immediate ?? null,
+    geocodes: info.geocodes ? info.geocodes.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    polygons: parseGeom(info.polygons),
+    circles: parseGeom(info.circles),
+    resources: resources.map((r) => ({
+      id: r.id,
+      mimeType: r.mimeType,
+      resourceDesc: r.resourceDesc,
+      uri: r.uri,
+      size: r.size,
+      hasEmbeddedData: r.hasEmbeddedData,
+    })),
+  };
+}
+
 /**
  * Total number of distinct alerts matching the given filters (ignoring
  * limit/offset). Uses COUNT(DISTINCT a.id) rather than COUNT(*): the query
@@ -523,6 +713,199 @@ async function stats() {
   return { total, bySource, latestSent: latest ? latest.sent : null };
 }
 
+// --- Auth: users + sessions (only consulted when NAADS_AUTH is set) ---
+// Password hashing/verification lives in src/auth.js; this layer only
+// stores and reads. broadcast_prefs holds the operator's saved location /
+// auto-play filter as a JSON string.
+
+async function createUser({ username, passHash, role = 'user' }) {
+  await ensureSchema();
+  const res = await pool.query(
+    `INSERT INTO users (username, pass_hash, role) VALUES ($1, $2, $3)
+     RETURNING id, username, pass_hash, role, broadcast_prefs, created_at`,
+    [username, passHash, role]
+  );
+  return res.rows[0];
+}
+
+async function getUserByUsername(username) {
+  await ensureSchema();
+  const res = await pool.query(
+    'SELECT id, username, pass_hash, role, broadcast_prefs, created_at FROM users WHERE username = $1',
+    [username]
+  );
+  return res.rows[0] || null;
+}
+
+async function getUserById(id) {
+  await ensureSchema();
+  const res = await pool.query(
+    'SELECT id, username, pass_hash, role, broadcast_prefs, created_at FROM users WHERE id = $1',
+    [id]
+  );
+  return res.rows[0] || null;
+}
+
+async function listUsers() {
+  await ensureSchema();
+  return (await pool.query('SELECT id, username, role, created_at FROM users ORDER BY username ASC')).rows;
+}
+
+async function countUsers() {
+  await ensureSchema();
+  return (await pool.query(`SELECT COUNT(*)::int c FROM users WHERE role <> 'guest'`)).rows[0].c;
+}
+
+async function updateUserPassword(username, passHash) {
+  await ensureSchema();
+  return (await pool.query('UPDATE users SET pass_hash = $1 WHERE username = $2', [passHash, username])).rowCount;
+}
+
+async function setUserRole(username, role) {
+  await ensureSchema();
+  return (await pool.query('UPDATE users SET role = $1 WHERE username = $2', [role, username])).rowCount;
+}
+
+async function deleteUser(username) {
+  await ensureSchema();
+  return (await pool.query('DELETE FROM users WHERE username = $1', [username])).rowCount;
+}
+
+async function getUserBroadcastPrefs(id) {
+  const user = await getUserById(id);
+  if (!user || !user.broadcast_prefs) return null;
+  try {
+    return JSON.parse(user.broadcast_prefs);
+  } catch {
+    return null;
+  }
+}
+
+async function setUserBroadcastPrefs(id, prefs) {
+  await ensureSchema();
+  return (await pool.query('UPDATE users SET broadcast_prefs = $1 WHERE id = $2', [
+    prefs == null ? null : JSON.stringify(prefs),
+    id,
+  ])).rowCount;
+}
+
+async function createSession({ id, userId, expiresAt, userAgent }) {
+  await ensureSchema();
+  await pool.query(
+    'INSERT INTO sessions (id, user_id, expires_at, user_agent) VALUES ($1, $2, $3::timestamptz, $4)',
+    [id, userId, expiresAt, userAgent || null]
+  );
+  return { id, userId, expiresAt };
+}
+
+async function getSessionWithUser(id) {
+  await ensureSchema();
+  const res = await pool.query(
+    `SELECT s.id, s.user_id, s.expires_at, u.username, u.role, u.broadcast_prefs
+     FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.id = $1 AND s.expires_at > now()`,
+    [id]
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  let prefs = null;
+  if (row.broadcast_prefs) {
+    try {
+      prefs = JSON.parse(row.broadcast_prefs);
+    } catch {
+      prefs = null;
+    }
+  }
+  return {
+    id: row.id,
+    userId: row.user_id,
+    username: row.username,
+    role: row.role,
+    broadcastPrefs: prefs,
+    expiresAt: row.expires_at,
+  };
+}
+
+async function destroySession(id) {
+  await ensureSchema();
+  return (await pool.query('DELETE FROM sessions WHERE id = $1', [id])).rowCount;
+}
+
+async function deleteExpiredSessions() {
+  await ensureSchema();
+  return (await pool.query('DELETE FROM sessions WHERE expires_at <= now()')).rowCount;
+}
+
+// --- stream keys (personal HLS capability URLs) ---
+
+function parseKeyFilter(row) {
+  if (!row) return null;
+  let filter = null;
+  if (row.filter) {
+    try {
+      filter = JSON.parse(row.filter);
+    } catch {
+      filter = null;
+    }
+  }
+  return { ...row, filter };
+}
+
+async function createStreamKey({ key, userId = null, filter = null, label = null }) {
+  await ensureSchema();
+  const res = await pool.query(
+    `INSERT INTO stream_keys (key, user_id, filter, label) VALUES ($1, $2, $3, $4)
+     RETURNING key, user_id, filter, label, created_at, last_used_at`,
+    [key, userId, filter == null ? null : JSON.stringify(filter), label]
+  );
+  return parseKeyFilter(res.rows[0]);
+}
+
+async function getStreamKey(key) {
+  await ensureSchema();
+  const res = await pool.query(
+    'SELECT key, user_id, filter, label, created_at, last_used_at FROM stream_keys WHERE key = $1',
+    [key]
+  );
+  return parseKeyFilter(res.rows[0]);
+}
+
+async function listStreamKeys(userId) {
+  await ensureSchema();
+  const res = await pool.query(
+    'SELECT key, user_id, filter, label, created_at, last_used_at FROM stream_keys WHERE user_id = $1 ORDER BY created_at DESC',
+    [userId]
+  );
+  return res.rows.map(parseKeyFilter);
+}
+
+async function listAllStreamKeys() {
+  await ensureSchema();
+  const res = await pool.query(
+    `SELECT s.key, s.user_id, s.filter, s.label, s.created_at, s.last_used_at, u.username
+     FROM stream_keys s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC`
+  );
+  return res.rows.map(parseKeyFilter);
+}
+
+async function deleteStreamKey(key) {
+  await ensureSchema();
+  return (await pool.query('DELETE FROM stream_keys WHERE key = $1', [key])).rowCount;
+}
+
+async function touchStreamKey(key) {
+  await ensureSchema();
+  return (await pool.query('UPDATE stream_keys SET last_used_at = now() WHERE key = $1', [key])).rowCount;
+}
+
+async function setStreamKeyFilter(key, filter) {
+  await ensureSchema();
+  return (await pool.query('UPDATE stream_keys SET filter = $1 WHERE key = $2', [
+    filter == null ? null : JSON.stringify(filter),
+    key,
+  ])).rowCount;
+}
+
 module.exports = {
   insertAlert,
   alertExists,
@@ -531,6 +914,7 @@ module.exports = {
   searchAlerts,
   countAlerts,
   getAlertRawXml,
+  getAlertForBroadcast,
   getResourceById,
   getCandidateAlertsForResourceBackfill,
   countCandidateAlertsForResourceBackfill,
@@ -538,5 +922,29 @@ module.exports = {
   getCandidateAlertsForFlagBackfill,
   countCandidateAlertsForFlagBackfill,
   backfillFlagsForAlert,
+  getCandidateAlertsForGeoBackfill,
+  countCandidateAlertsForGeoBackfill,
+  backfillGeoForAlert,
   stats,
+  createUser,
+  getUserByUsername,
+  getUserById,
+  listUsers,
+  countUsers,
+  updateUserPassword,
+  setUserRole,
+  deleteUser,
+  getUserBroadcastPrefs,
+  setUserBroadcastPrefs,
+  createSession,
+  getSessionWithUser,
+  destroySession,
+  deleteExpiredSessions,
+  createStreamKey,
+  getStreamKey,
+  listStreamKeys,
+  listAllStreamKeys,
+  deleteStreamKey,
+  touchStreamKey,
+  setStreamKeyFilter,
 };

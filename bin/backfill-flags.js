@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 'use strict';
 
-// Backfills the Broadcast Immediate / Wireless Immediate flags (CAP
-// <parameter> elements -- see LMD User Guide Appendix 3) for alerts that
-// were already stored before this parsing existed. This re-parses each
-// candidate alert's already-stored raw XML -- no network access is needed,
-// since the original CAP-CP document was kept in full in `alerts.raw_xml`.
+// Backfills the SOREM CAP <parameter> fields (LMD User Guide Appendix 3) for
+// alerts stored before this parsing existed: the Broadcast Immediate /
+// Wireless Immediate flags and the layer:SOREM:1.0:Broadcast_Text on-air
+// script. This re-parses each candidate alert's already-stored raw XML -- no
+// network access is needed, since the original CAP-CP document was kept in
+// full in `alerts.raw_xml`.
 //
 // Unlike bin/backfill-resources.js, this always recomputes (rather than
 // skipping alerts that already have a value) since NULL is ambiguous here

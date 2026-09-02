@@ -1,9 +1,12 @@
 'use strict';
 
 const { NaadStreamClient } = require('./realtimeClient');
-const { insertAlert } = require('./db');
+const { insertAlert, getAlertForBroadcast } = require('./db');
 const { parseHeartbeatReferences } = require('./capParser');
 const { recoverMissedAlerts } = require('./missedAlertRecovery');
+const alertBus = require('./alertBus');
+
+const BROADCAST_LANG = process.env.NAADS_BROADCAST_LANG || 'en';
 
 // Both are live simultaneously under normal operation; the NAADS LMD User
 // Guide recommends connecting to both for redundancy and discarding
@@ -29,9 +32,16 @@ function startRealtimeListeners() {
     client.on('alert', (parsed, rawXml) => {
       const receivedAt = new Date().toISOString();
       insertAlert(parsed, rawXml, `realtime-${client.name}`)
-        .then((result) => {
-          if (result.inserted) {
-            console.log(`[realtime:${client.name}] new alert ${parsed.identifier} (${parsed.infos[0]?.event || 'unknown event'}) received at ${receivedAt}`);
+        .then(async (result) => {
+          if (!result.inserted) return;
+          console.log(`[realtime:${client.name}] new alert ${parsed.identifier} (${parsed.infos[0]?.event || 'unknown event'}) received at ${receivedAt}`);
+          // Fan out to the live broadcast feed (SSE clients, future muxer).
+          // Failure here must not affect archiving, so it's isolated.
+          try {
+            const payload = await getAlertForBroadcast(result.id, { language: BROADCAST_LANG });
+            if (payload) alertBus.emit('alert', { ...payload, receivedAt });
+          } catch (err) {
+            console.error(`[realtime:${client.name}] broadcast fan-out failed for ${parsed.identifier}: ${err.message}`);
           }
         })
         .catch((err) => console.error(`[realtime:${client.name}] failed to store alert ${parsed.identifier}: ${err.message}`));

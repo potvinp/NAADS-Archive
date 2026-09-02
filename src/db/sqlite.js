@@ -82,6 +82,15 @@ function ensureColumn(table, column, definition) {
 }
 ensureColumn('alert_info', 'broadcast_immediate', 'INTEGER');
 ensureColumn('alert_info', 'wireless_immediate', 'INTEGER');
+// Structured area geometry (JSON): polygons as [[[lat,lon],...],...],
+// circles as [{lat,lon,radiusKm},...]. Parsed from CAP <polygon>/<circle>
+// and used by the live broadcast feed's location filter. The flattened
+// area_desc/geocodes columns above are left as-is for search.
+ensureColumn('alert_info', 'polygons', 'TEXT');
+ensureColumn('alert_info', 'circles', 'TEXT');
+// "layer:SOREM:1.0:Broadcast_Text" -- the exact script NAADS TTS reads on
+// air; shown verbatim on the broadcast feed's emergency card.
+ensureColumn('alert_info', 'broadcast_text', 'TEXT');
 
 db.exec(`
 CREATE INDEX IF NOT EXISTS idx_info_alert_id ON alert_info(alert_id);
@@ -125,6 +134,41 @@ CREATE TABLE IF NOT EXISTS poll_state (
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Optional auth (only consulted when NAADS_AUTH is set; see src/auth.js).
+-- One row per account. The reserved username 'guest' backs no-credential
+-- guest sessions and has an empty pass_hash (unusable for password login).
+CREATE TABLE IF NOT EXISTS users (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  username        TEXT NOT NULL UNIQUE,
+  pass_hash       TEXT NOT NULL,
+  role            TEXT NOT NULL DEFAULT 'user',
+  broadcast_prefs TEXT,
+  created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+  id          TEXT PRIMARY KEY,
+  user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  expires_at  TEXT NOT NULL,
+  user_agent  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
+
+-- Capability URLs for a personal HLS stream: whoever holds the key can pull
+-- /hls/s/<key>/live.m3u8 with no login. Bound to a user (filter follows their
+-- saved broadcast prefs) or standalone (filter is the stored JSON).
+CREATE TABLE IF NOT EXISTS stream_keys (
+  key          TEXT PRIMARY KEY,
+  user_id      INTEGER REFERENCES users(id) ON DELETE CASCADE,
+  filter       TEXT,
+  label        TEXT,
+  created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stream_keys_user_id ON stream_keys(user_id);
 `);
 
 const insertAlertStmt = db.prepare(`
@@ -136,11 +180,17 @@ const insertAlertStmt = db.prepare(`
 const insertInfoStmt = db.prepare(`
   INSERT INTO alert_info (alert_id, language, category, event, response_type, urgency, severity, certainty,
     effective, onset, expires, sender_name, headline, description, instruction, web, area_desc, geocodes,
-    broadcast_immediate, wireless_immediate)
+    broadcast_immediate, wireless_immediate, polygons, circles, broadcast_text)
   VALUES (@alert_id, @language, @category, @event, @response_type, @urgency, @severity, @certainty,
     @effective, @onset, @expires, @sender_name, @headline, @description, @instruction, @web, @area_desc, @geocodes,
-    @broadcast_immediate, @wireless_immediate)
+    @broadcast_immediate, @wireless_immediate, @polygons, @circles, @broadcast_text)
 `);
+
+// Serialize the parsed polygon/circle arrays for storage; null (not "[]")
+// when the info block carries no geometry, so a NULL column is unambiguous.
+function geomJson(value) {
+  return value && value.length ? JSON.stringify(value) : null;
+}
 
 // SQLite has no native boolean type; store the tri-state (true/false/unknown)
 // flag as 1/0/NULL.
@@ -229,6 +279,9 @@ function insertAlert(parsedAlert, rawXml, fetchedFrom) {
       geocodes: infoBlock.geocodes || null,
       broadcast_immediate: boolToInt(infoBlock.broadcastImmediate),
       wireless_immediate: boolToInt(infoBlock.wirelessImmediate),
+      polygons: geomJson(infoBlock.polygons),
+      circles: geomJson(infoBlock.circles),
+      broadcast_text: infoBlock.broadcastText || null,
     });
 
     insertResources(infoResult.lastInsertRowid, infoBlock.resources);
@@ -410,19 +463,17 @@ function backfillResourcesForAlert(alertId, parsedInfos) {
   return run();
 }
 
-// --- Flag backfill (for alerts stored before BI/WI parameter parsing existed) ---
+// --- Flag backfill (for alerts stored before the SOREM <parameter> parsing
+// existed): recomputes broadcast_immediate / wireless_immediate and the
+// broadcast_text script, all from the same <parameter> list. ---
 
+const FLAG_CANDIDATE_WHERE = `raw_xml LIKE '%Broadcast_Immediately%' OR raw_xml LIKE '%Broadcast_Intrusive%' OR raw_xml LIKE '%WirelessImmediate%' OR raw_xml LIKE '%Broadcast_Text%'`;
 const candidateFlagAlertsStmt = db.prepare(`
-  SELECT id, raw_xml FROM alerts
-  WHERE raw_xml LIKE '%Broadcast_Immediately%' OR raw_xml LIKE '%Broadcast_Intrusive%' OR raw_xml LIKE '%WirelessImmediate%'
-  ORDER BY id ASC LIMIT ? OFFSET ?
+  SELECT id, raw_xml FROM alerts WHERE ${FLAG_CANDIDATE_WHERE} ORDER BY id ASC LIMIT ? OFFSET ?
 `);
-const countCandidateFlagAlertsStmt = db.prepare(`
-  SELECT COUNT(*) c FROM alerts
-  WHERE raw_xml LIKE '%Broadcast_Immediately%' OR raw_xml LIKE '%Broadcast_Intrusive%' OR raw_xml LIKE '%WirelessImmediate%'
-`);
-const alertInfoFlagsStmt = db.prepare(`SELECT id, broadcast_immediate, wireless_immediate FROM alert_info WHERE alert_id = ? ORDER BY id ASC`);
-const updateFlagsStmt = db.prepare(`UPDATE alert_info SET broadcast_immediate = @broadcast_immediate, wireless_immediate = @wireless_immediate WHERE id = @id`);
+const countCandidateFlagAlertsStmt = db.prepare(`SELECT COUNT(*) c FROM alerts WHERE ${FLAG_CANDIDATE_WHERE}`);
+const alertInfoFlagsStmt = db.prepare(`SELECT id, broadcast_immediate, wireless_immediate, broadcast_text FROM alert_info WHERE alert_id = ? ORDER BY id ASC`);
+const updateFlagsStmt = db.prepare(`UPDATE alert_info SET broadcast_immediate = @broadcast_immediate, wireless_immediate = @wireless_immediate, broadcast_text = @broadcast_text WHERE id = @id`);
 
 /**
  * A page of alerts whose raw XML mentions one of the BI/WI parameter names
@@ -462,14 +513,137 @@ function backfillFlagsForAlert(alertId, parsedInfos) {
     for (let i = 0; i < infoRows.length; i++) {
       const newBI = boolToInt(parsedInfos[i].broadcastImmediate);
       const newWI = boolToInt(parsedInfos[i].wirelessImmediate);
-      if (infoRows[i].broadcast_immediate === newBI && infoRows[i].wireless_immediate === newWI) continue;
-      updateFlagsStmt.run({ id: infoRows[i].id, broadcast_immediate: newBI, wireless_immediate: newWI });
+      const newText = parsedInfos[i].broadcastText || null;
+      if (
+        infoRows[i].broadcast_immediate === newBI &&
+        infoRows[i].wireless_immediate === newWI &&
+        (infoRows[i].broadcast_text || null) === newText
+      ) continue;
+      updateFlagsStmt.run({ id: infoRows[i].id, broadcast_immediate: newBI, wireless_immediate: newWI, broadcast_text: newText });
       updated++;
     }
     return updated;
   });
 
   return run();
+}
+
+// --- Geometry backfill (for alerts stored before polygon/circle parsing) ---
+
+const candidateGeoAlertsStmt = db.prepare(`
+  SELECT id, raw_xml FROM alerts
+  WHERE raw_xml LIKE '%<polygon%' OR raw_xml LIKE '%<circle%'
+  ORDER BY id ASC LIMIT ? OFFSET ?
+`);
+const countCandidateGeoAlertsStmt = db.prepare(`
+  SELECT COUNT(*) c FROM alerts WHERE raw_xml LIKE '%<polygon%' OR raw_xml LIKE '%<circle%'
+`);
+const alertInfoGeoStmt = db.prepare(`SELECT id, polygons, circles FROM alert_info WHERE alert_id = ? ORDER BY id ASC`);
+const updateGeoStmt = db.prepare(`UPDATE alert_info SET polygons = @polygons, circles = @circles WHERE id = @id`);
+
+function getCandidateAlertsForGeoBackfill(limit, offset) {
+  return candidateGeoAlertsStmt.all(limit, offset);
+}
+
+function countCandidateAlertsForGeoBackfill() {
+  return countCandidateGeoAlertsStmt.get().c;
+}
+
+/**
+ * Re-parses an already-stored alert's raw XML and (re)writes its structured
+ * polygon/circle geometry. Overwrites rather than skipping (like the flag
+ * backfill): a NULL column is ambiguous between "never parsed" and "parsed,
+ * no geometry". Idempotent, so safe to re-run.
+ * Returns the number of alert_info rows whose geometry actually changed.
+ */
+function backfillGeoForAlert(alertId, parsedInfos) {
+  const infoRows = alertInfoGeoStmt.all(alertId);
+  if (infoRows.length !== parsedInfos.length) {
+    throw new Error(
+      `info block count mismatch (stored ${infoRows.length}, parsed ${parsedInfos.length})`
+    );
+  }
+
+  const run = db.transaction(() => {
+    let updated = 0;
+    for (let i = 0; i < infoRows.length; i++) {
+      const newPoly = geomJson(parsedInfos[i].polygons);
+      const newCirc = geomJson(parsedInfos[i].circles);
+      if ((infoRows[i].polygons || null) === newPoly && (infoRows[i].circles || null) === newCirc) continue;
+      updateGeoStmt.run({ id: infoRows[i].id, polygons: newPoly, circles: newCirc });
+      updated++;
+    }
+    return updated;
+  });
+
+  return run();
+}
+
+function parseGeom(json) {
+  if (!json) return [];
+  try {
+    const v = JSON.parse(json);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * One alert shaped for the live broadcast feed (see src/alertBus.js): the
+ * alert plus a single <info> block (preferring the given language prefix,
+ * else the first) with its attachments and parsed area geometry. Separate
+ * from searchAlerts() so the hot search path is untouched.
+ */
+function getAlertForBroadcast(id, { language } = {}) {
+  const alert = db.prepare(
+    `SELECT id, identifier, sender, sent, status, source, msg_type, scope FROM alerts WHERE id = ? AND is_heartbeat = 0`
+  ).get(id);
+  if (!alert) return null;
+
+  const infos = db.prepare(`SELECT * FROM alert_info WHERE alert_id = ? ORDER BY id ASC`).all(id);
+  if (!infos.length) return null;
+
+  let info = infos[0];
+  if (language) {
+    const want = language.toLowerCase();
+    const pref = infos.find((r) => (r.language || '').toLowerCase().startsWith(want));
+    if (pref) info = pref;
+  }
+
+  const resources = getResourcesByInfoIds([info.id])[info.id] || [];
+
+  return {
+    id: alert.id,
+    identifier: alert.identifier,
+    sender: alert.sender,
+    sent: alert.sent,
+    status: alert.status,
+    source: alert.source,
+    language: info.language,
+    event: info.event,
+    headline: info.headline,
+    description: info.description,
+    instruction: info.instruction,
+    severity: info.severity,
+    urgency: info.urgency,
+    certainty: info.certainty,
+    areaDesc: info.area_desc,
+    broadcastText: info.broadcast_text || null,
+    broadcastImmediate: info.broadcast_immediate === null ? null : !!info.broadcast_immediate,
+    wirelessImmediate: info.wireless_immediate === null ? null : !!info.wireless_immediate,
+    geocodes: info.geocodes ? info.geocodes.split(',').map((s) => s.trim()).filter(Boolean) : [],
+    polygons: parseGeom(info.polygons),
+    circles: parseGeom(info.circles),
+    resources: resources.map((r) => ({
+      id: r.id,
+      mimeType: r.mimeType,
+      resourceDesc: r.resourceDesc,
+      uri: r.uri,
+      size: r.size,
+      hasEmbeddedData: r.hasEmbeddedData,
+    })),
+  };
 }
 
 /**
@@ -499,6 +673,150 @@ function stats() {
   return { total, bySource, latestSent: latest ? latest.sent : null };
 }
 
+// --- Auth: users + sessions (only consulted when NAADS_AUTH is set) ---
+// Password hashing/verification lives in src/auth.js; this layer only
+// stores and reads. broadcast_prefs holds the operator's saved location /
+// auto-play filter as a JSON string.
+
+const insertUserStmt = db.prepare(`INSERT INTO users (username, pass_hash, role) VALUES (@username, @pass_hash, @role)`);
+const userByUsernameStmt = db.prepare(`SELECT id, username, pass_hash, role, broadcast_prefs, created_at FROM users WHERE username = ?`);
+const userByIdStmt = db.prepare(`SELECT id, username, pass_hash, role, broadcast_prefs, created_at FROM users WHERE id = ?`);
+const listUsersStmt = db.prepare(`SELECT id, username, role, created_at FROM users ORDER BY username ASC`);
+const countUsersStmt = db.prepare(`SELECT COUNT(*) c FROM users WHERE role != 'guest'`);
+const updateUserPasswordStmt = db.prepare(`UPDATE users SET pass_hash = @pass_hash WHERE username = @username`);
+const setUserRoleStmt = db.prepare(`UPDATE users SET role = @role WHERE username = @username`);
+const deleteUserStmt = db.prepare(`DELETE FROM users WHERE username = ?`);
+const setBroadcastPrefsStmt = db.prepare(`UPDATE users SET broadcast_prefs = @broadcast_prefs WHERE id = @id`);
+
+function createUser({ username, passHash, role = 'user' }) {
+  const info = insertUserStmt.run({ username, pass_hash: passHash, role });
+  return userByIdStmt.get(info.lastInsertRowid);
+}
+function getUserByUsername(username) {
+  return userByUsernameStmt.get(username) || null;
+}
+function getUserById(id) {
+  return userByIdStmt.get(id) || null;
+}
+function listUsers() {
+  return listUsersStmt.all();
+}
+function countUsers() {
+  return countUsersStmt.get().c;
+}
+function updateUserPassword(username, passHash) {
+  return updateUserPasswordStmt.run({ username, pass_hash: passHash }).changes;
+}
+function setUserRole(username, role) {
+  return setUserRoleStmt.run({ username, role }).changes;
+}
+function deleteUser(username) {
+  return deleteUserStmt.run(username).changes;
+}
+function getUserBroadcastPrefs(id) {
+  const row = userByIdStmt.get(id);
+  if (!row || !row.broadcast_prefs) return null;
+  try {
+    return JSON.parse(row.broadcast_prefs);
+  } catch {
+    return null;
+  }
+}
+function setUserBroadcastPrefs(id, prefs) {
+  return setBroadcastPrefsStmt.run({ id, broadcast_prefs: prefs == null ? null : JSON.stringify(prefs) }).changes;
+}
+
+const insertSessionStmt = db.prepare(
+  `INSERT INTO sessions (id, user_id, expires_at, user_agent) VALUES (@id, @user_id, @expires_at, @user_agent)`
+);
+const sessionWithUserStmt = db.prepare(`
+  SELECT s.id, s.user_id, s.expires_at, u.username, u.role, u.broadcast_prefs
+  FROM sessions s JOIN users u ON u.id = s.user_id
+  WHERE s.id = ?
+`);
+const deleteSessionStmt = db.prepare(`DELETE FROM sessions WHERE id = ?`);
+const deleteExpiredSessionsStmt = db.prepare(`DELETE FROM sessions WHERE datetime(expires_at) <= datetime('now')`);
+
+function createSession({ id, userId, expiresAt, userAgent }) {
+  insertSessionStmt.run({ id, user_id: userId, expires_at: expiresAt, user_agent: userAgent || null });
+  return { id, userId, expiresAt };
+}
+function getSessionWithUser(id) {
+  const row = sessionWithUserStmt.get(id);
+  if (!row) return null;
+  if (new Date(row.expires_at).getTime() <= Date.now()) return null;
+  let prefs = null;
+  if (row.broadcast_prefs) {
+    try {
+      prefs = JSON.parse(row.broadcast_prefs);
+    } catch {
+      prefs = null;
+    }
+  }
+  return {
+    id: row.id,
+    userId: row.user_id,
+    username: row.username,
+    role: row.role,
+    broadcastPrefs: prefs,
+    expiresAt: row.expires_at,
+  };
+}
+function destroySession(id) {
+  return deleteSessionStmt.run(id).changes;
+}
+function deleteExpiredSessions() {
+  return deleteExpiredSessionsStmt.run().changes;
+}
+
+// --- stream keys (personal HLS capability URLs) ---
+
+const insertStreamKeyStmt = db.prepare(
+  `INSERT INTO stream_keys (key, user_id, filter, label) VALUES (@key, @user_id, @filter, @label)`
+);
+const streamKeyStmt = db.prepare(`SELECT key, user_id, filter, label, created_at, last_used_at FROM stream_keys WHERE key = ?`);
+const streamKeysByUserStmt = db.prepare(`SELECT key, user_id, filter, label, created_at, last_used_at FROM stream_keys WHERE user_id = ? ORDER BY created_at DESC`);
+const allStreamKeysStmt = db.prepare(`SELECT s.key, s.user_id, s.filter, s.label, s.created_at, s.last_used_at, u.username FROM stream_keys s LEFT JOIN users u ON u.id = s.user_id ORDER BY s.created_at DESC`);
+const deleteStreamKeyStmt = db.prepare(`DELETE FROM stream_keys WHERE key = ?`);
+const touchStreamKeyStmt = db.prepare(`UPDATE stream_keys SET last_used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE key = ?`);
+const updateStreamKeyFilterStmt = db.prepare(`UPDATE stream_keys SET filter = @filter WHERE key = @key`);
+
+function parseFilter(row) {
+  if (!row) return row;
+  let filter = null;
+  if (row.filter) {
+    try {
+      filter = JSON.parse(row.filter);
+    } catch {
+      filter = null;
+    }
+  }
+  return { ...row, filter };
+}
+
+function createStreamKey({ key, userId = null, filter = null, label = null }) {
+  insertStreamKeyStmt.run({ key, user_id: userId, filter: filter == null ? null : JSON.stringify(filter), label });
+  return parseFilter(streamKeyStmt.get(key));
+}
+function getStreamKey(key) {
+  return parseFilter(streamKeyStmt.get(key)) || null;
+}
+function listStreamKeys(userId) {
+  return streamKeysByUserStmt.all(userId).map(parseFilter);
+}
+function listAllStreamKeys() {
+  return allStreamKeysStmt.all().map(parseFilter);
+}
+function deleteStreamKey(key) {
+  return deleteStreamKeyStmt.run(key).changes;
+}
+function touchStreamKey(key) {
+  return touchStreamKeyStmt.run(key).changes;
+}
+function setStreamKeyFilter(key, filter) {
+  return updateStreamKeyFilterStmt.run({ key, filter: filter == null ? null : JSON.stringify(filter) }).changes;
+}
+
 module.exports = {
   insertAlert,
   alertExists,
@@ -507,6 +825,7 @@ module.exports = {
   searchAlerts,
   countAlerts,
   getAlertRawXml,
+  getAlertForBroadcast,
   getResourceById,
   getCandidateAlertsForResourceBackfill,
   countCandidateAlertsForResourceBackfill,
@@ -514,5 +833,29 @@ module.exports = {
   getCandidateAlertsForFlagBackfill,
   countCandidateAlertsForFlagBackfill,
   backfillFlagsForAlert,
+  getCandidateAlertsForGeoBackfill,
+  countCandidateAlertsForGeoBackfill,
+  backfillGeoForAlert,
   stats,
+  createUser,
+  getUserByUsername,
+  getUserById,
+  listUsers,
+  countUsers,
+  updateUserPassword,
+  setUserRole,
+  deleteUser,
+  getUserBroadcastPrefs,
+  setUserBroadcastPrefs,
+  createSession,
+  getSessionWithUser,
+  destroySession,
+  deleteExpiredSessions,
+  createStreamKey,
+  getStreamKey,
+  listStreamKeys,
+  listAllStreamKeys,
+  deleteStreamKey,
+  touchStreamKey,
+  setStreamKeyFilter,
 };
